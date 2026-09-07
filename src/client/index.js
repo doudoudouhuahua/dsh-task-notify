@@ -218,7 +218,6 @@ const cssText = `
 .dtn_input:focus { border-color: var(--dsw-alias-brand-primary); }
 .dtn_input::placeholder { color: var(--dsw-alias-label-tertiary); }
 
-.dtn_actions { display: flex; gap: 8px; margin-top: 10px; }
 .dtn_primary {
   flex: 1;
   height: 30px;
@@ -261,6 +260,28 @@ function adoptStyles() {
   style.id = STYLE_ID
   style.textContent = cssText
   document.head.appendChild(style)
+}
+
+// Collapsible-group open/closed state, persisted per browser so reopening the
+// panel restores the user's LAST arrangement. First ever use: all collapsed.
+const GROUPS_KEY = 'dsh-task-notify.groups'
+const GROUP_DEFAULTS = { kinds: false, push: false }
+const readGroups = () => {
+  try {
+    const raw = window.localStorage.getItem(GROUPS_KEY)
+    if (raw === null) return null
+    const parsed = JSON.parse(raw)
+    if (parsed !== null && typeof parsed === 'object'
+      && typeof parsed.kinds === 'boolean' && typeof parsed.push === 'boolean') {
+      return { kinds: parsed.kinds, push: parsed.push }
+    }
+  } catch { /* 读取失败按默认处理 */ }
+  return null
+}
+const writeGroups = (state) => {
+  try {
+    window.localStorage.setItem(GROUPS_KEY, JSON.stringify(state))
+  } catch { /* 存储不可用时静默（无记忆性，其余功能不受影响） */ }
 }
 
 /** Hollow line bell (Feather-style) for push-off, solid bell for push-on. */
@@ -457,6 +478,22 @@ export function apply(ctx) {
     }
   }
 
+  // Instant-save queue: one toggle → one write, no manual save. The strict
+  // wire codec needs a COMPLETE settings object, so each queued save rebuilds
+  // the snapshot at execution time (after the previous write landed and
+  // refreshed lastSettings) — rapid toggles never overwrite each other with
+  // a stale snapshot.
+  let saveChain = Promise.resolve()
+  const instantSave = (key, next) => {
+    const run = async () => {
+      const current = settingsReady ? lastSettings : null
+      if (current === null || current === undefined) return { ok: false, error: '设置尚未加载' }
+      return await saveSettings(Object.assign({}, current, { [key]: next }))
+    }
+    saveChain = saveChain.then(run, run)
+    return saveChain
+  }
+
   const testPush = async () => {
     if (taskNotify === undefined) return { ok: false, error: '服务未就绪' }
     try {
@@ -529,36 +566,52 @@ export function apply(ctx) {
 
   function Panel() {
     useSnapshot()
-    const [draft, setDraft] = React.useState(null)
     const [note, setNote] = React.useState(null)
+    // Token draft: typed text is held locally until 「保存 Token」 — text needs
+    // an explicit save; every switch instead persists on the spot (no manual
+    // save button for them).
+    const [tokenDraft, setTokenDraft] = React.useState(null)
     // null = derive defaults from the current settings on every render; the
     // first user toggle freezes an explicit open/closed choice.
     const [groups, setGroups] = React.useState(null)
     React.useEffect(() => {
       if (panelOpen) {
-        setDraft(null)
         setNote(null)
+        setTokenDraft(null)
+        // Forget the in-memory choice so this open re-reads the persisted one
+        // (also picks up changes made in other tabs since the last open).
         setGroups(null)
         void loadSettings()
       }
     }, [panelOpen])
     if (!panelOpen) return null
-    const settings = draft ?? lastSettings ?? {
+    const settings = lastSettings ?? {
       push: false, token: '', enabled: true, agent: false, subagent: true, workflow: true,
       approval: true, question: true, plan: true, goal: true,
     }
     const masterOn = settings.enabled !== false
-    // Collapse defaults: kinds is the daily surface (open); the push layer
-    // auto-expands when it is configured (switch on or token set).
-    const groupState = groups ?? {
-      kinds: true,
-      push: settings.push === true || (typeof settings.token === 'string' && settings.token !== ''),
-    }
+    const tokenText = tokenDraft ?? settings.token ?? ''
+    // Open/closed per the persisted arrangement; first ever use is all
+    // collapsed (GROUP_DEFAULTS). While `groups` is null the read happens on
+    // render, so the remembered state paints on the very first frame.
+    const groupState = groups ?? readGroups() ?? GROUP_DEFAULTS
     const toggleGroup = (key) => {
-      setGroups(Object.assign({}, groupState, { [key]: !groupState[key] }))
+      const next = Object.assign({}, groupState, { [key]: !groupState[key] })
+      setGroups(next)
+      writeGroups(next)
     }
-    const toggle = (key) => (event) => setDraft(Object.assign({}, settings, { [key]: event.target.checked }))
-    const setToken = (event) => setDraft(Object.assign({}, settings, { token: event.target.value }))
+    // Switch → immediate write through the serialized save queue. No draft,
+    // no save click; the controlled switch only flips once the host confirms,
+    // and a failed write shows a note instead (state stays on the host value).
+    const toggle = (key) => (event) => {
+      const next = event.target.checked === true
+      void instantSave(key, next).then((outcome) => {
+        if (outcome.ok !== true) {
+          setNote({ ok: false, text: '保存失败：' + String(outcome.error ?? '') })
+        }
+      })
+    }
+    const setToken = (event) => setTokenDraft(event.target.value)
     const row = (key, labelText) => React.createElement('div', { className: 'dtn_row', key },
       React.createElement('span', { className: 'dtn_rowLabel' }, labelText),
       React.createElement(Switch, { checked: settings[key] === true, onChange: toggle(key) }))
@@ -586,16 +639,25 @@ export function apply(ctx) {
         ? React.createElement('div', { className: 'dtn_groupBody' }, ...children)
         : null)
     }
-    const save = async () => {
-      const outcome = await saveSettings(draft ?? settings)
+    const saveToken = async () => {
+      const outcome = await saveSettings(Object.assign({}, settings, { token: tokenText }))
       setNote({
         ok: outcome.ok === true,
-        text: outcome.ok === true ? '已保存' : '保存失败：' + String(outcome.error ?? ''),
+        text: outcome.ok === true ? 'Token 已保存' : '保存失败：' + String(outcome.error ?? ''),
       })
-      if (outcome.ok === true) setDraft(null)
+      if (outcome.ok === true) setTokenDraft(null)
     }
     const test = async () => {
-      await saveSettings(draft ?? settings)
+      // An unsaved token draft is persisted first, so testing the channel
+      // right after pasting a token works without an extra save click.
+      if (tokenDraft !== null) {
+        const outcome = await saveSettings(Object.assign({}, settings, { token: tokenDraft }))
+        if (outcome.ok !== true) {
+          setNote({ ok: false, text: 'Token 保存失败：' + String(outcome.error ?? '') })
+          return
+        }
+        setTokenDraft(null)
+      }
       const result = await testPush()
       setNote({ ok: result.ok === true, text: result.ok === true ? '测试消息已发送，请查收' : '失败：' + String(result.error ?? '') })
     }
@@ -644,15 +706,20 @@ export function apply(ctx) {
         React.createElement(Switch, { checked: settings.push === true, onChange: toggle('push') })),
       React.createElement('input', {
         className: 'dtn_input', type: 'password', placeholder: 'PushPlus Token',
-        value: settings.token ?? '', onChange: setToken,
+        value: tokenText, onChange: setToken,
+        onKeyDown: (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            void saveToken()
+          }
+        },
       }),
-      React.createElement('button', { className: 'dtn_ghost dtn_testBtn', onClick: test }, '测试手机推送'),
+      React.createElement('button', { className: 'dtn_primary dtn_testBtn', onClick: () => { void saveToken() } }, '保存 Token'),
+      React.createElement('button', { className: 'dtn_ghost dtn_testBtn', onClick: () => { void test() } }, '测试手机推送'),
     ]),
-    // Actions live in their own never-dimmed section, so saving the master
-    // switch off remains possible.
+    // Results and errors (switch saves, token save, test outcomes) land here,
+    // never dimmed, empty when nothing happened.
     React.createElement('div', { className: 'dtn_section' },
-      React.createElement('div', { className: 'dtn_actions' },
-        React.createElement('button', { className: 'dtn_primary', onClick: save }, '保存')),
       note === null ? null : React.createElement('p', { className: 'dtn_note', 'data-ok': note.ok ? 'true' : 'false' }, note.text)))
   }
 
