@@ -10,7 +10,6 @@
  * /plugins/dsh-task-notify/client.js.
  */
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
 import { createHash } from 'node:crypto'
 import { copyFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
@@ -26,8 +25,13 @@ export const name = 'dsh-task-notify'
 /** Services required before load: the Typert registry and the settings provider. */
 export const inject = ['typert', 'settings']
 
-/** The branded settings namespace. */
-const NS = settingsNamespace('task-notify')
+/**
+ * The durable settings namespace. Plain literal since DSH 0.1.3-alpha.1
+ * (2026-08-30 refactor removed the `settingsNamespace(...)` helper from
+ * @deepseek-ai/dsh-settings — `ctx.settings.register` accepts the string
+ * directly). The namespace is unchanged, so stored settings carry over.
+ */
+const NS = 'task-notify'
 
 /**
  * Absolute path of the DeepSeek app logo (deepseek.png at the package root),

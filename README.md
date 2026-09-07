@@ -33,6 +33,15 @@ DSH（DeepSeek Harness）Web 插件：Agent / 子代理 / 工作流任务完成�
 
 ## 安装
 
+方式 A（推荐，DSH ≥ 0.1.3-alpha.1 的 git 源直装，自动 reconcile `dsh.profile.bundles`）：
+
+```powershell
+dsh plugin --profile web add git+https://github.com/V-Reason/dsh-task-notify.git
+# 更新时：dsh plugin --profile web update dsh-task-notify
+```
+
+方式 B（本地 `file:` 依赖，手改 profile）：
+
 1. 在 profile 的 `package.json` 中 `dependencies` 增加：
 
    ```json
@@ -44,6 +53,8 @@ DSH（DeepSeek Harness）Web 插件：Agent / 子代理 / 工作流任务完成�
 
 > 宿主行由本包自带的 bundle 补丁（`cordis.patch.yml`）注入，**不要**再写入 profile 的
 > `cordis.patch.yml`，否则启动报 `duplicate loader entry id: dsh-task-notify`。
+> profile 的 `pnpm-workspace.yaml` 中 `allowBuilds: node-pty: true` 必须为真，否则安装会以
+> `ERR_PNPM_IGNORED_BUILDS` 失败（CLI 判定失败且不 reconcile bundles）。
 
 ## 使用
 
@@ -83,6 +94,13 @@ v1.4.0 修复/优化（仅客户端）：
 - 开关全部**即改即存**（串行化写入，快速连按互不覆盖），取消手动「保存」按钮；仅 Token 文本输入
   保留「保存 Token」（回车等效），测试手机推送前会自动落盘未保存的 Token；
 - 鼠标左键点击面板外任意位置关闭面板（面板内与右上角 × 不受影响，点击铃铛仍是开/关切换）。
+
+v1.5.0（适配 DSH 0.1.3-alpha.1 —— 2026-08-30 平台重构）：
+- 移除对 `@deepseek-ai/dsh-settings` 的 `settingsNamespace(...)` 静态导入（该导出已被平台删除，
+  旧版在 DSH 0.1.3-alpha.1 下启动即报
+  `does not provide an export named 'settingsNamespace'`）；命名空间改为字面量
+  `'task-notify'`，`ctx.settings.register` 签名不变，**设置数据（settings.yaml）无需迁移**；
+- 宿主侧外部平台导入仅保留 `@deepseek-ai/dsh-typert-protocol`（schemastery/cosmokit 继续 vendor）。
 
 ## 构建
 
