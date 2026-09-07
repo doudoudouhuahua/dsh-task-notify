@@ -58,6 +58,7 @@ const cssText = `
   position: fixed;
   top: 58px;
   width: 296px;
+  max-height: calc(100vh - 76px);
   padding: 6px 0;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 14px;
@@ -65,7 +66,8 @@ const cssText = `
   backdrop-filter: blur(16px);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
   pointer-events: auto;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .dtn_panelHead {
   display: flex;
@@ -112,6 +114,44 @@ const cssText = `
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+.dtn_group[data-disabled='true'] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+.dtn_groupHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: left;
+  cursor: pointer;
+}
+.dtn_groupHead:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.dtn_groupChevron {
+  flex: none;
+  display: inline-flex;
+  transition: transform 0.15s ease;
+}
+.dtn_group[data-open='true'] .dtn_groupChevron { transform: rotate(180deg); }
+.dtn_groupBody {
+  padding: 2px 14px 10px;
+}
+.dtn_testBtn {
+  width: 100%;
+  margin-top: 10px;
 }
 .dtn_row {
   display: flex;
@@ -250,6 +290,16 @@ function PhoneBadge() {
     }))
 }
 
+/** Small chevron for the collapsible group headers (points down when open). */
+function GroupChevron() {
+  return React.createElement('svg', {
+    className: 'dtn_groupChevron', width: 12, height: 12, viewBox: '0 0 24 24',
+    fill: 'none', stroke: 'currentColor', strokeWidth: 2,
+    strokeLinecap: 'round', strokeLinejoin: 'round',
+  },
+  React.createElement('path', { d: 'M6 9l6 6 6-6' }))
+}
+
 export function apply(ctx) {
   adoptStyles()
 
@@ -259,6 +309,10 @@ export function apply(ctx) {
     const reflect = ctx.reflect
     taskNotify = reflect === undefined ? undefined : reflect.get('remote.taskNotify')
     if (taskNotify === undefined) throw new Error('dsh-task-notify: the taskNotify Remote namespace did not mount')
+    // First check: fetch settings as soon as the Remote is live, so the bell
+    // shows the REAL state instead of the pre-load default (the 10s poll is
+    // only a cross-tab / restart backstop).
+    void loadSettings()
     return () => {
       taskNotify = undefined
       void dispose()
@@ -269,12 +323,15 @@ export function apply(ctx) {
   // needed to keep clear of dsh-better-sidebar's panels.
   let panelOpen = false
   let lastSettings = null
+  // True only after at least one successful settings read/write; until then
+  // the bell must NOT paint the default (solid) icon.
+  let settingsReady = false
   let sidebarRight = 0
   let sidebarBottom = 0
   const listeners = new Set()
   const emit = () => { for (const l of listeners) l() }
   const setPanelOpen = (next) => { panelOpen = next; emit() }
-  const setSettings = (next) => { lastSettings = next; emit() }
+  const setSettings = (next) => { lastSettings = next; settingsReady = true; emit() }
   const useSnapshot = () => {
     const [v, setV] = React.useState(0)
     React.useEffect(() => {
@@ -372,7 +429,7 @@ export function apply(ctx) {
 
   const unwrap = (result) => (result !== null && result !== undefined && result.ok === true) ? result.value : undefined
 
-  const loadSettings = async () => {
+  async function loadSettings() {
     if (taskNotify === undefined) return
     try {
       const value = unwrap(await taskNotify.getSettings())
@@ -421,15 +478,39 @@ export function apply(ctx) {
     return () => clearInterval(timer)
   }, 'dsh-task-notify: settings refresh')
 
+  // Outside-left-click dismissal: while the panel is open, a left pointerdown
+  // outside BOTH the panel and every bell closes it. The bell row is excluded
+  // so its own onClick keeps the open/close toggle; everything inside the
+  // panel (×, switches, inputs) keeps working untouched. Same semantics as
+  // the harness's useDismissOnOutsidePointer (pointerdown — immediate),
+  // adapted for trigger and surface living in different DOM roots.
+  ctx.effect(() => {
+    const onPointerDown = (event) => {
+      if (!panelOpen) return
+      if (event.button !== 0) return
+      const target = event.target
+      if (!(target instanceof Element)) return
+      if (target.closest('.dtn_panel') !== null) return
+      if (target.closest('.dtn_bell') !== null) return
+      setPanelOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => { document.removeEventListener('pointerdown', onPointerDown) }
+  }, 'dsh-task-notify: outside-pointer close')
+
   function HeaderButton() {
     useSnapshot()
     const settings = lastSettings
-    const enabled = settings?.enabled !== false
-    const pushOn = enabled && settings?.push === true
+    // Until the first successful settings read the bell must stay neutral
+    // (hollow, no badge) — the pre-load default must never claim a state the
+    // host has not confirmed yet.
+    const enabled = settingsReady && settings?.enabled !== false
+    const pushOn = settingsReady && enabled && settings?.push === true
     return React.createElement('button', {
       className: 'dtn_bell',
-      title: '任务完成提醒',
+      title: settingsReady ? '任务完成提醒' : '任务完成提醒（同步中）',
       'data-on': enabled ? 'true' : 'false',
+      'data-ready': settingsReady ? 'true' : 'false',
       'data-open': panelOpen ? 'true' : 'false',
       onClick: () => setPanelOpen(!panelOpen),
     },
@@ -450,10 +531,14 @@ export function apply(ctx) {
     useSnapshot()
     const [draft, setDraft] = React.useState(null)
     const [note, setNote] = React.useState(null)
+    // null = derive defaults from the current settings on every render; the
+    // first user toggle freezes an explicit open/closed choice.
+    const [groups, setGroups] = React.useState(null)
     React.useEffect(() => {
       if (panelOpen) {
         setDraft(null)
         setNote(null)
+        setGroups(null)
         void loadSettings()
       }
     }, [panelOpen])
@@ -463,6 +548,15 @@ export function apply(ctx) {
       approval: true, question: true, plan: true, goal: true,
     }
     const masterOn = settings.enabled !== false
+    // Collapse defaults: kinds is the daily surface (open); the push layer
+    // auto-expands when it is configured (switch on or token set).
+    const groupState = groups ?? {
+      kinds: true,
+      push: settings.push === true || (typeof settings.token === 'string' && settings.token !== ''),
+    }
+    const toggleGroup = (key) => {
+      setGroups(Object.assign({}, groupState, { [key]: !groupState[key] }))
+    }
     const toggle = (key) => (event) => setDraft(Object.assign({}, settings, { [key]: event.target.checked }))
     const setToken = (event) => setDraft(Object.assign({}, settings, { token: event.target.value }))
     const row = (key, labelText) => React.createElement('div', { className: 'dtn_row', key },
@@ -473,6 +567,25 @@ export function apply(ctx) {
       key,
       'data-disabled': dim && !masterOn ? 'true' : 'false',
     }, ...children)
+    const group = (key, dim, labelText, children) => {
+      const open = groupState[key] === true
+      return React.createElement('div', {
+        className: 'dtn_group',
+        key,
+        'data-open': open ? 'true' : 'false',
+        'data-disabled': dim && !masterOn ? 'true' : 'false',
+      },
+      React.createElement('button', {
+        className: 'dtn_groupHead', type: 'button',
+        'aria-expanded': open ? 'true' : 'false',
+        onClick: () => toggleGroup(key),
+      },
+      React.createElement('span', null, labelText),
+      React.createElement(GroupChevron)),
+      open
+        ? React.createElement('div', { className: 'dtn_groupBody' }, ...children)
+        : null)
+    }
     const save = async () => {
       const outcome = await saveSettings(draft ?? settings)
       setNote({
@@ -515,8 +628,7 @@ export function apply(ctx) {
         React.createElement('span', { className: 'dtn_rowLabel' }, '总开关'),
         React.createElement(Switch, { checked: masterOn, onChange: toggle('enabled') })),
     ]),
-    section('kinds', true, [
-      React.createElement('span', { className: 'dtn_sectionLabel' }, '提醒对象'),
+    group('kinds', true, '通知类型', [
       row('agent', '主回合'),
       row('subagent', '子代理'),
       row('workflow', '工作流'),
@@ -524,23 +636,23 @@ export function apply(ctx) {
       row('question', '询问用户'),
       row('plan', '计划确认'),
       row('goal', '目标受阻'),
+      React.createElement('button', { className: 'dtn_ghost dtn_testBtn', onClick: testNotify }, '测试 Windows 通知'),
     ]),
-    section('push', true, [
+    group('push', true, '手机推送', [
       React.createElement('div', { className: 'dtn_row' },
-        React.createElement('span', { className: 'dtn_rowLabel' }, '手机推送（PushPlus）'),
+        React.createElement('span', { className: 'dtn_rowLabel' }, 'PushPlus 推送'),
         React.createElement(Switch, { checked: settings.push === true, onChange: toggle('push') })),
       React.createElement('input', {
         className: 'dtn_input', type: 'password', placeholder: 'PushPlus Token',
         value: settings.token ?? '', onChange: setToken,
       }),
+      React.createElement('button', { className: 'dtn_ghost dtn_testBtn', onClick: test }, '测试手机推送'),
     ]),
     // Actions live in their own never-dimmed section, so saving the master
     // switch off remains possible.
     React.createElement('div', { className: 'dtn_section' },
       React.createElement('div', { className: 'dtn_actions' },
-        React.createElement('button', { className: 'dtn_primary', onClick: save }, '保存'),
-        React.createElement('button', { className: 'dtn_ghost', onClick: test }, '测试推送'),
-        React.createElement('button', { className: 'dtn_ghost', onClick: testNotify }, '测试通知')),
+        React.createElement('button', { className: 'dtn_primary', onClick: save }, '保存')),
       note === null ? null : React.createElement('p', { className: 'dtn_note', 'data-ok': note.ok ? 'true' : 'false' }, note.text)))
   }
 

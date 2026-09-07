@@ -12,6 +12,10 @@
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
+import { createHash } from 'node:crypto'
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { INVOCATIONS, TYPERT_MANIFEST } from './contract.js'
@@ -27,9 +31,54 @@ const NS = settingsNamespace('task-notify')
 
 /**
  * Absolute path of the DeepSeek app logo (deepseek.png at the package root),
- * resolved from this bundled module (…/lib/index.js → package root).
+ * resolved from this bundled module (…/lib/index.js → package root). The file
+ * itself is re-read per toast (hot update): replacing it takes effect on the
+ * NEXT notification, with no rebuild or plugin restart.
  */
-const ICON_PATH = fileURLToPath(new URL('../deepseek.png', import.meta.url))
+const ICON_SOURCE = fileURLToPath(new URL('../deepseek.png', import.meta.url))
+
+/**
+ * Toast-icon hot-update cache. Windows toast images are cached by URI, so a
+ * replaced deepseek.png at the same path would keep showing the OLD logo.
+ * Every toast therefore fingerprints the source file and, when it changed,
+ * copies it to a content-addressed temp file — a fresh URI per icon version
+ * forces the OS to render the new image. Fallbacks: the last known temp copy
+ * when the source is momentarily unreadable, no AppLogo at all when no copy
+ * exists yet.
+ */
+const ICON_TMP_DIR = join(tmpdir(), 'dsh-task-notify-icons')
+let iconCache = { fingerprint: null, path: null }
+
+const iconFingerprint = () => {
+  try {
+    return createHash('sha1').update(readFileSync(ICON_SOURCE)).digest('hex')
+  } catch {
+    return null
+  }
+}
+
+const resolveToastIcon = () => {
+  const fingerprint = iconFingerprint()
+  if (fingerprint === null) return iconCache.path
+  if (iconCache.fingerprint === fingerprint && iconCache.path !== null) return iconCache.path
+  let path = null
+  try {
+    mkdirSync(ICON_TMP_DIR, { recursive: true })
+    path = join(ICON_TMP_DIR, 'deepseek-' + fingerprint.slice(0, 12) + '.png')
+    copyFileSync(ICON_SOURCE, path)
+    // Drop temp copies of earlier icon versions.
+    for (const entry of readdirSync(ICON_TMP_DIR)) {
+      if (entry === basename(path)) continue
+      if (!entry.startsWith('deepseek-') || !entry.endsWith('.png')) continue
+      try { unlinkSync(join(ICON_TMP_DIR, entry)) } catch { /* 忽略 */ }
+    }
+  } catch (error) {
+    console.error('[dsh-task-notify] icon copy failed:', error)
+    return iconCache.path
+  }
+  iconCache = { fingerprint, path }
+  return path
+}
 
 /** Durable settings section schema (defaults: push off, main-turn off, attention kinds on). */
 const SettingsSchema = z.object({
@@ -103,9 +152,9 @@ const pushBody = (item) => bodyLines(item).join('\n')
  * Show a REAL Windows toast notification through the BurntToast PowerShell
  * module (New-BurntToastNotification), run by pwsh (PowerShell 7 — the
  * BurntToast module lives in the pwsh module path, Windows PowerShell 5.1
- * does not see it). The toast carries the DeepSeek app logo (deepseek.png)
- * and the OS plays its default notification sound. Fails quietly (never
- * throws).
+ * does not see it). The toast carries the DeepSeek app logo (deepseek.png,
+ * re-resolved per toast so replaced icons apply immediately) and the OS plays
+ * its default notification sound. Fails quietly (never throws).
  */
 const showWindowsToast = (title, lines) => new Promise((resolve) => {
   // BurntToast's -Text accepts at most 3 entries: bold title + 2 body lines;
@@ -116,10 +165,15 @@ const showWindowsToast = (title, lines) => new Promise((resolve) => {
     texts[texts.length - 1] += '\n' + last
   }
   const payload = Buffer.from(JSON.stringify(texts), 'utf8').toString('base64')
+  // Fresh icon URI per content version (see resolveToastIcon), so a replaced
+  // deepseek.png shows up on the next toast instead of a cached old image.
+  const icon = resolveToastIcon()
   const script = [
     'Import-Module BurntToast',
     `$t=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json`,
-    `New-BurntToastNotification -Text $t -AppLogo '${ICON_PATH}'`,
+    icon === null
+      ? 'New-BurntToastNotification -Text $t'
+      : `New-BurntToastNotification -Text $t -AppLogo '${icon}'`,
   ].join(';')
   try {
     const child = spawn('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
