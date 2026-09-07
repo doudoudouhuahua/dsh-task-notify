@@ -102,6 +102,16 @@ v1.5.0（适配 DSH 0.1.3-alpha.1 —— 2026-08-30 平台重构）：
   `'task-notify'`，`ctx.settings.register` 签名不变，**设置数据（settings.yaml）无需迁移**；
 - 宿主侧外部平台导入仅保留 `@deepseek-ai/dsh-typert-protocol`（schemastery/cosmokit 继续 vendor）。
 
+v1.6.0（修复设置面板出现在左侧 —— 适配 dsh-better-sidebar 0.18 的 `data-dsh-panel-host` 布局）：
+- 原因：better-sidebar 0.17 起真实面板被包进全视口的 `[data-dsh-panel-host]` 固定层，而旧逻辑测量
+  `[data-dsh-better-sidebar]` 的**直接子元素**——现在只剩这一个全视口包装层，其矩形恰好满足
+  "右对齐 / 底对齐"两条启发式，使 `sidebarRight` 被算成 `视口宽 − 200`，设置面板被推到
+  **屏幕左侧**（约 112px 被裁出视口）；
+- 修复：改为按 `[data-dsh-panel]` 标记测量**真实面板**（右侧面板与底部面板各命中一次），并新增
+  `rect.width < 视口宽` / `rect.height < 视口高` 守卫排除 100vw 全宽抽屉等全视口元素；
+- 行为恢复：右侧面板收起时设置面板贴右上（距右缘 16px），右侧面板展开时位于其左侧且不重叠，
+  拖拽调整宽度时仍逐帧实时跟随；窄屏全宽抽屉不再误推位置（抽屉遮挡属于既有已知限制）。
+
 ## 构建
 
 ```powershell

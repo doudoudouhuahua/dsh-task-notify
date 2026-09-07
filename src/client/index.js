@@ -369,6 +369,15 @@ export function apply(ctx) {
   // right-aligned elements count as the right panel; only horizontally
   // on-screen, bottom-aligned ones as the bottom panel — translated-away
   // hidden panels never contribute an inset.
+  //
+  // Since better-sidebar 0.17 the real panels live inside a full-viewport
+  // `[data-dsh-panel-host]` wrapper (fixed; inset:0) that is the host's ONLY
+  // direct child. Measuring host.children would see that wrapper, which
+  // satisfies BOTH heuristics and yields `right ≈ innerWidth - 200` — the
+  // settings panel is then pushed to the LEFT edge of the window. Measure
+  // the actual panels by their `[data-dsh-panel]` markers instead, and
+  // never count a full-viewport element as a panel (a 100vw drawer would
+  // otherwise contribute the same bogus inset).
   let sidebarHost = null
   let hostCheckAt = 0
   const getSidebarHost = () => {
@@ -386,16 +395,16 @@ export function apply(ctx) {
     if (host !== null && host !== undefined) {
       const width = window.innerWidth
       const height = window.innerHeight
-      for (const child of host.children) {
+      for (const child of host.querySelectorAll('[data-dsh-panel]')) {
         try {
           const rect = child.getBoundingClientRect()
-          if (rect.width > 0 && rect.height > 80
+          if (rect.width > 0 && rect.width < width && rect.height > 80
             && rect.top >= -8 && rect.top < height
             && rect.left >= 0 && rect.left < width
             && rect.right >= width - 2) {
             right = Math.max(right, Math.min(Math.round(width - rect.left), width - 200))
           }
-          if (rect.width > 160 && rect.height > 0
+          if (rect.width > 160 && rect.height > 0 && rect.height < height
             && rect.left >= -8 && rect.left < width
             && rect.top >= 0 && rect.top < height
             && rect.bottom >= height - 2) {
