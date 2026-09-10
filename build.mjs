@@ -8,14 +8,36 @@
  * strict schemas, so no other dependency enters either bundle.
  * Run:  node build.mjs
  */
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 const HARNESS = process.env.DSH_HARNESS ?? 'T:/deepseek-harness'
 
+/**
+ * pnpm keeps one directory per esbuild version; the harness bumps it freely,
+ * so a hardcoded version would break this build. Enumerate them newest-first.
+ */
+function pnpmEsbuildEntries() {
+  const store = `${HARNESS}/node_modules/.pnpm`
+  if (!existsSync(store)) return []
+  const versionOf = (entry) => entry.slice('esbuild@'.length).split('_')[0].split('.').map(Number)
+  return readdirSync(store)
+    .filter((entry) => entry.startsWith('esbuild@'))
+    .sort((a, b) => {
+      const left = versionOf(a)
+      const right = versionOf(b)
+      for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+        const diff = (right[index] ?? 0) - (left[index] ?? 0)
+        if (diff !== 0) return diff
+      }
+      return 0
+    })
+    .map((entry) => `${store}/${entry}/node_modules/esbuild/lib/main.js`)
+}
+
 const esbuildCandidates = [
-  `${HARNESS}/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/lib/main.js`,
   `${HARNESS}/node_modules/esbuild/lib/main.js`,
+  ...pnpmEsbuildEntries(),
 ]
 const esbuildEntry = esbuildCandidates.find((p) => existsSync(p))
 if (!esbuildEntry) {

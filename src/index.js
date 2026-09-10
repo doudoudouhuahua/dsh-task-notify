@@ -98,15 +98,6 @@ const SettingsSchema = z.object({
   goal: z.boolean().default(true),
 })
 
-const kindLabel = (kind) =>
-  kind === 'subagent' ? '子代理任务'
-    : kind === 'workflow' ? '工作流'
-      : kind === 'agent' ? 'Agent 回合'
-        : kind === 'approval' ? '审批请求'
-          : kind === 'question' ? '询问'
-            : kind === 'plan' ? '计划确认'
-              : kind === 'goal' ? '目标受阻' : '提醒'
-
 /** Per-kind toast / push title. */
 const kindTitle = (kind) =>
   kind === 'approval' ? '需要你的审批'
@@ -238,8 +229,10 @@ class TaskNotifyRuntime extends TypertRemoteService {
 
   next() {
     if (this.queue.length === 0) return []
+    // Drain only what is returned; a deeper backlog stays queued instead of
+    // being discarded (the queue is capped at 20 on the producer side).
     const items = this.queue.slice(0, 10)
-    this.queue = []
+    this.queue = this.queue.slice(items.length)
     return items
   }
 
@@ -262,7 +255,27 @@ export function apply(ctx) {
   const settings = ctx.settings.register(NS, SettingsSchema, { applies: 'live' })
   const runtime = new TaskNotifyRuntime(ctx, settings)
 
-  const sessions = ctx.get('sessions')
+  // Resolved lazily: a service that is not yet provided at apply time must not
+  // be frozen into `undefined` for the whole process lifetime.
+  const sessions = () => ctx.get('sessions')
+
+  /**
+   * Immutable snapshot of one session's event log. DSH 0.1.3-alpha.1
+   * (2026-08-30 refactor) removed `session.events` in favour of the public
+   * `session.snapshotEvents()` reader, so reading the old property yielded
+   * `undefined` and every fold below silently degraded. Total by design: an
+   * absent or foreign session object reads as an empty log.
+   */
+  const sessionLog = (session) => {
+    if (session === undefined || session === null) return []
+    try {
+      const events = session.snapshotEvents()
+      return Array.isArray(events) ? events : []
+    } catch {
+      return []
+    }
+  }
+
   const titleOf = (session) => {
     if (session === undefined || session === null) return undefined
     try {
@@ -287,7 +300,7 @@ export function apply(ctx) {
         ? undefined
         : current.header.parentSession
       if (parentId === undefined || parentId === null || parentId === '') break
-      const parent = sessions === undefined ? undefined : sessions.get(parentId)
+      const parent = sessions()?.get(parentId)
       if (parent === undefined || parent === null) break
       current = parent
     }
@@ -321,16 +334,14 @@ export function apply(ctx) {
   /**
    * Whether plan mode is in force for a session: the last logged `plan/mode`
    * wins, a log with none folds to inactive. Same fold as the harness's
-   * `foldPlanMode`, re-implemented here to avoid a new peer dependency.
+   * `planProjectionDefinition.apply`, re-implemented here to avoid a new peer
+   * dependency.
    */
   const planModeActive = (session) => {
-    if (session === undefined || session === null) return false
     let active = false
-    try {
-      for (const event of session.events) {
-        if (event.type === 'plan/mode') active = event.data.active === true
-      }
-    } catch { /* 忽略 */ }
+    for (const event of sessionLog(session)) {
+      if (event.type === 'plan/mode') active = event.data.active === true
+    }
     return active
   }
 
@@ -365,15 +376,12 @@ export function apply(ctx) {
 
   /** Label of the last `turn/end` reason for the session (fallback 结束). */
   const turnEndLabel = (session) => {
-    if (session === undefined || session === null) return '结束'
-    try {
-      for (let index = session.events.length - 1; index >= 0; index -= 1) {
-        const event = session.events[index]
-        if (event.type !== 'turn/end') continue
-        const label = STATUS_TEXT[event.data?.reason?.kind]
-        return label ?? '结束'
-      }
-    } catch { /* 忽略 */ }
+    const events = sessionLog(session)
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event.type !== 'turn/end') continue
+      return STATUS_TEXT[event.data?.reason?.kind] ?? '结束'
+    }
     return '结束'
   }
 
@@ -515,7 +523,7 @@ export function apply(ctx) {
   ctx.on('subagent/end', (info) => {
     if (!settings.get().subagent) return
     const id = info === null || info === undefined ? undefined : info.id
-    const child = sessions?.get(id)
+    const child = id === undefined ? undefined : sessions()?.get(id)
     const root = rootOf(child) ?? currentRoot
     if (root !== undefined) currentRoot = root
     notify(String(id ?? info?.runId ?? 'subagent'), {
@@ -539,6 +547,11 @@ export function apply(ctx) {
     if (payload?.status !== 'idle') return
     const agent = payload === null || payload === undefined ? undefined : payload.agent
     if (agent === undefined || agent === null) return
+    // 主回合 means the conversation the user is driving. A delegated child's
+    // idle lands right after its own `subagent/end` (which owns that toast),
+    // so a non-root agent must not raise a second, mislabelled one — without
+    // this guard the 主回合 switch alone would notify for every subagent.
+    if (!isLiveRootSession(agent.session)) return
     const root = rootOf(agent.session)
     if (root !== undefined) currentRoot = root
     notify(String(agent.id), {

@@ -254,12 +254,18 @@ const cssText = `
 .dtn_note[data-ok='false'] { color: var(--dsw-alias-state-error-primary); }
 `
 
+/**
+ * Inject the panel stylesheet once, returning the disposer that removes it
+ * again (the element is plugin-owned, so plugin unload must not leave it
+ * behind). Re-entry after an HMR reload reuses the existing element.
+ */
 function adoptStyles() {
-  if (document.getElementById(STYLE_ID) !== null) return
+  if (document.getElementById(STYLE_ID) !== null) return () => {}
   const style = document.createElement('style')
   style.id = STYLE_ID
   style.textContent = cssText
   document.head.appendChild(style)
+  return () => { style.remove() }
 }
 
 // Collapsible-group open/closed state, persisted per browser so reopening the
@@ -322,7 +328,7 @@ function GroupChevron() {
 }
 
 export function apply(ctx) {
-  adoptStyles()
+  ctx.effect(() => adoptStyles(), 'dsh-task-notify: styles')
 
   let taskNotify
   ctx.effect(async () => {
@@ -419,8 +425,18 @@ export function apply(ctx) {
         const snap = better.getSnapshot()
         const state = snap === null || snap === undefined ? undefined : snap.state
         if (state !== null && state !== undefined) {
-          if (state.panelOpen === true) right = Math.max(right, Math.min(Number(state.width) || 0, window.innerWidth))
-          if (state.bottomOpen === true) bottom = Math.max(bottom, Math.min(Number(state.bottomHeight) || 0, window.innerHeight))
+          // Same guards as the DOM branch above: a panel that is effectively
+          // viewport-wide (narrow merged drawer) or taller than the viewport
+          // must not become an inset, or the settings panel is pushed off
+          // screen instead of merely overlapping the drawer.
+          const panelWidth = Number(state.width) || 0
+          if (state.panelOpen === true && panelWidth > 0 && panelWidth < window.innerWidth - 200) {
+            right = Math.max(right, panelWidth)
+          }
+          const bottomHeight = Number(state.bottomHeight) || 0
+          if (state.bottomOpen === true && bottomHeight > 0 && bottomHeight < window.innerHeight - 160) {
+            bottom = Math.max(bottom, bottomHeight)
+          }
         }
       } catch { /* 忽略 */ }
     }
@@ -432,6 +448,7 @@ export function apply(ctx) {
   }
   // 60fps requestAnimationFrame loop; cheap when nothing changes.
   let insetSubscribed = false
+  let unsubscribeInsets = null
   ctx.effect(() => {
     let rafId = 0
     const loop = () => {
@@ -439,9 +456,12 @@ export function apply(ctx) {
       if (!insetSubscribed && better !== null && better !== undefined && typeof better.subscribeState === 'function') {
         insetSubscribed = true
         try {
-          better.subscribeState(refreshInsets)
+          // Kept so the plugin owns the subscription: a discarded disposer
+          // keeps this closure alive across unload / HMR reload.
+          unsubscribeInsets = better.subscribeState(refreshInsets)
         } catch {
           insetSubscribed = false
+          unsubscribeInsets = null
         }
       }
       refreshInsets()
@@ -454,10 +474,24 @@ export function apply(ctx) {
     return () => {
       cancelAnimationFrame(rafId)
       window.removeEventListener('resize', onResize)
+      const off = unsubscribeInsets
+      unsubscribeInsets = null
+      insetSubscribed = false
+      if (off !== null && off !== undefined) {
+        try { off() } catch { /* 忽略 */ }
+      }
     }
   }, 'dsh-task-notify: layout insets')
 
   const unwrap = (result) => (result !== null && result !== undefined && result.ok === true) ? result.value : undefined
+
+  /** Human text of a failed RemoteResult (its RemoteError carries message + code). */
+  const remoteError = (result) => {
+    const err = result === null || result === undefined ? undefined : result.error
+    if (typeof err?.message === 'string' && err.message !== '') return err.message
+    if (typeof err?.code === 'string' && err.code !== '') return err.code
+    return '未知错误'
+  }
 
   async function loadSettings() {
     if (taskNotify === undefined) return
@@ -506,11 +540,14 @@ export function apply(ctx) {
   const testPush = async () => {
     if (taskNotify === undefined) return { ok: false, error: '服务未就绪' }
     try {
-      const value = unwrap(await taskNotify.testPush())
-      return value ?? { ok: false, error: '服务未就绪' }
+      const result = await taskNotify.testPush()
+      if (result !== null && result !== undefined && result.ok === true) {
+        return unwrap(result) ?? { ok: true }
+      }
+      return { ok: false, error: remoteError(result) }
     } catch (error) {
       console.error('[dsh-task-notify] test push failed:', error)
-      return { ok: false, error: String(error ?? '') }
+      return { ok: false, error: String(error?.message ?? error ?? '') }
     }
   }
 
@@ -676,12 +713,16 @@ export function apply(ctx) {
         return
       }
       try {
-        const value = unwrap(await taskNotify.testNotify())
-        const result = value ?? { ok: false, error: '服务未就绪' }
-        setNote({
-          ok: result.ok === true,
-          text: result.ok === true ? '已弹出 Windows 系统通知（含提示音）' : '失败：' + String(result.error ?? ''),
-        })
+        const result = await taskNotify.testNotify()
+        if (result !== null && result !== undefined && result.ok === true) {
+          const value = unwrap(result) ?? { ok: true }
+          setNote({
+            ok: value.ok === true,
+            text: value.ok === true ? '已弹出 Windows 系统通知（含提示音）' : '失败：' + String(value.error ?? ''),
+          })
+          return
+        }
+        setNote({ ok: false, text: '失败：' + remoteError(result) })
       } catch (error) {
         console.error('[dsh-task-notify] test notify failed:', error)
         setNote({ ok: false, text: '失败：' + String(error?.message ?? error ?? '') })
@@ -689,7 +730,12 @@ export function apply(ctx) {
     }
     return React.createElement('div', {
       className: 'dtn_panel',
-      style: { right: 16 + sidebarRight },
+      // `right` clears the better-sidebar right panel; the height cap clears
+      // its bottom panel, which spans the centre column under this panel.
+      style: {
+        right: 16 + sidebarRight,
+        maxHeight: 'calc(100vh - ' + (76 + sidebarBottom) + 'px)',
+      },
     },
     React.createElement('div', { className: 'dtn_panelHead' },
       React.createElement('h4', { className: 'dtn_panelTitle' }, '任务完成提醒'),

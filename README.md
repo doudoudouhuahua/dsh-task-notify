@@ -14,7 +14,7 @@ DSH（DeepSeek Harness）Web 插件：Agent / 子代理 / 工作流任务完成�
 - **目标受阻**：goal 自动回合因持续阻塞而停止（模型上报或到达轮次上限）时，通知「目标受阻」（含阻塞原因），提醒你处理或清除；
 - **分类开关**：主回合 / 子代理 / 工作流 / 需要审批 / 询问用户 / 计划确认 / 目标受阻 独立开关，另有总开关一键关闭全部通知；
 - **持久配置**：配置存于 DSH settings（`task-notify` 命名空间），重启不丢；
-- **布局自适应**：配置面板逐帧（rAF）跟随 dsh-better-sidebar 面板让位，不遮挡。
+- **布局自适应**：配置面板逐帧（rAF）跟随 dsh-better-sidebar 的右侧面板（左右让位）与底部面板（高度让位），不遮挡。
 
 ## 界面
 
@@ -81,6 +81,7 @@ dsh plugin --profile web add git+https://github.com/V-Reason/dsh-task-notify.git
 
 v1.2.0 已实测通过：**任务完成 / 需要审批 / 询问用户 / 目标受阻**。
 **计划待确认**需先在会话中进入计划模式（`/plan`）后由 agent 调用 `exit_plan_mode` 触发，按上表操作即可验收。
+v1.6.1 已在宿主侧以「假 Cordis 上下文 + 假事件」回归验证上表全部触发条件与状态文案（见下方 v1.6.1 说明）。
 
 v1.3.0 新增：**通知图标热更新**——替换 `node_modules\dsh-task-notify\deepseek.png`（或仓库根目录的
 `deepseek.png`，取决于 `file:` 依赖是否软链）后，点「测试通知」即可验证 toast 角标已换成新图标，
@@ -111,6 +112,29 @@ v1.6.0（修复设置面板出现在左侧 —— 适配 dsh-better-sidebar 0.18
   `rect.width < 视口宽` / `rect.height < 视口高` 守卫排除 100vw 全宽抽屉等全视口元素；
 - 行为恢复：右侧面板收起时设置面板贴右上（距右缘 16px），右侧面板展开时位于其左侧且不重叠，
   拖拽调整宽度时仍逐帧实时跟随；窄屏全宽抽屉不再误推位置（抽屉遮挡属于既有已知限制）。
+
+v1.6.1（修复 DSH 0.1.3-alpha.1 下的失效通知与面板遮挡）：
+- **根因**：DSH 于 2026-08-28 的重构（`perf(session): separate indexed and snapshot log reads`，随
+  0.1.3-alpha.1 发布）删除了 `Session.events`，改为公开方法 `session.snapshotEvents()`。插件仍读旧属性，
+  取到 `undefined` 后被 `try/catch` 吞掉，导致两条链路静默失效：
+  - **计划待确认**：`planModeActive()` 恒为 `false`，`exit_plan_mode` 分支提前 return，通知从不发出；
+  - **状态文案**：`turnEndLabel()` 恒返回「结束」，主回合/子代理通知的「描述」再也显示不出
+    完成 / 失败 / 中止 / 超出上限 / 阻塞 / 中断。
+  修复：两处折叠改读 `session.snapshotEvents()`（折叠语义与 harness 的 `plan` 投影一致）。
+- **主回合只认根会话**：`agent/status` 对每个 agent（含子代理/工作流子代理）都会发 `idle`，旧逻辑靠 3 秒去重
+  窗口掩盖重复通知；关闭「子代理」开关后子代理完成仍会冒出「Agent任务完成」。现在非根 agent 直接跳过，
+  子代理完成一律由 `subagent/end` 负责（与 `userQuestions.ask` 的 `roots()` 边界同源）。
+- **底部面板让位**：`sidebarBottom` 原先只算不用，底部面板展开时配置面板被压在其下。现在面板
+  `max-height` 扣除底部面板高度；同时给 better-sidebar 快照分支补上与 DOM 分支同源的守卫
+  （全视口宽的窄屏抽屉、超过视口高的底部面板不再被当成内缩值，避免面板被推出视口）。
+- **生命周期收敛**：`betterSidebar.subscribeState` 的 disposer 与注入的 `<style>` 现在都挂在 effect 上，
+  插件卸载 / HMR 重载后不再残留监听与样式节点；`sessions` 改为惰性解析，服务晚就绪也不会被永久缓存成
+  `undefined`。
+- **错误可见**：两个测试按钮不再把 RPC 失败一律报成「服务未就绪」，而是显示宿主返回的真实错误
+  （`RemoteError.message` / `code`）。
+- **`next()` 不再丢条目**：一次只出队返回的 10 条，剩余留在队列；删除未使用的 `kindLabel`。
+- **构建健壮性**：`build.mjs` 不再硬编码 `esbuild@0.25.12` 路径，改为扫描 `node_modules/.pnpm/esbuild@*`
+  并按版本降序取用，harness 升级 esbuild 后仍可构建。
 
 ## 构建
 
