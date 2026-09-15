@@ -2,6 +2,28 @@
 
 [← 返回 README](../README.md)
 
+## 1.8.1 — 修复通知图标被静默换成 BurntToast 自带图片
+
+**修复：圆形角标不是 DeepSeek 图标，而是 BurntToast 自带的「吐司照片」**
+
+- 现象：通知能正常弹出，但圆形角标不是 DeepSeek 图标，而是 BurntToast 自带的「吐司照片」，
+  且插件与面板都报告成功；
+- 根因是 `TOAST_VARIANTS` 的**顺序**：`showWindowsToast` 以「首个 exit 0」为准返回，而排在首位的
+  `plain` 变体不带 `-AppLogo`、没有任何可失败之处，于是它每次都成功，logo 永远不会被传下去。
+  BurntToast 的 `New-BTImage` 声明了 `[string] $Source = $Script:DefaultImage`，
+  `New-BurntToastNotification` 在 `-AppLogo` 为空时正是**不带 `-Source`** 调用它，模块自带图片
+  因此被静默写进通知，而命令仍以 exit 0 结束；
+- 修复：把带 `-AppLogo` 的变体排到最前（`icon` → `plain` → `icon-pinned` → `plain-pinned`）。
+  `resolveToastIcon()` 返回 null 时本来就对所有变体禁用 `-AppLogo`，所以无图标变体仍保留为
+  「模块不接受该参数」时的重试路径；
+- **这类问题此前的 31 项契约检查全部通过**——它只断言 toast 送达（exit 0），而图标被替换时命令
+  同样 exit 0。因此新增 `tools/check-toast-icon.mjs`（`npm run verify:icon`）：读 Windows 通知
+  数据库，比对系统**实际记录的 `<image src>`**，并做了负向对照（把顺序改回 `plain` 优先即 FAIL）；
+- 同时修好排查工具本身的一个盲点：通知库是 WAL 模式，最新通知先落在 `wpndatabase.db-wal`，
+  只拷主库会读到过期历史（表现为刚发的通知查不到）。
+
+**升级须知**：宿主半是被 ESM 在进程启动时导入的，同步 `lib/index.js` 后**需要重启一次 DSH** 才会生效。
+
 ## 1.8.0 — 英文适配（滑块切换）+ BurntToast 自动安装
 
 **新增：中英双语，面板头部滑块热切换（默认中文）**
@@ -33,24 +55,6 @@
   **重试一次**，收到 `exit 4` 直接返回（模块已在，重试没有意义）；
 - `pwsh.exe` 不在 PATH 时不尝试安装，直接报「未找到 PowerShell 7」；所有失败按当前语言写入宿主日志
   与「测试 Windows 通知」的提示。
-
-**修复：通知图标被静默换成 BurntToast 自带图片**
-
-- 现象：通知能正常弹出，但圆形角标不是 DeepSeek 图标，而是 BurntToast 自带的「吐司照片」，
-  且插件与面板都报告成功；
-- 根因是 `TOAST_VARIANTS` 的**顺序**：`showWindowsToast` 以「首个 exit 0」为准返回，而排在首位的
-  `plain` 变体不带 `-AppLogo`、没有任何可失败之处，于是它每次都成功，logo 永远不会被传下去。
-  BurntToast 的 `New-BTImage` 声明了 `[string] $Source = $Script:DefaultImage`，
-  `New-BurntToastNotification` 在 `-AppLogo` 为空时正是**不带 `-Source`** 调用它，模块自带图片
-  因此被静默写进通知，而命令仍以 exit 0 结束；
-- 修复：把带 `-AppLogo` 的变体排到最前（`icon` → `plain` → `icon-pinned` → `plain-pinned`）。
-  `resolveToastIcon()` 返回 null 时本来就对所有变体禁用 `-AppLogo`，所以无图标变体仍保留为
-  「模块不接受该参数」时的重试路径；
-- **这类问题此前的 31 项契约检查全部通过**——它只断言 toast 送达（exit 0），而图标被替换时命令
-  同样 exit 0。因此新增 `tools/check-toast-icon.mjs`：读 Windows 通知数据库，比对系统**实际记录的
-  `<image src>`**，并做了负向对照（把顺序改回 `plain` 优先即 FAIL）；
-- 同时修好排查工具本身的一个盲点：通知库是 WAL 模式，最新通知先落在 `wpndatabase.db-wal`，
-  只拷主库会读到过期历史（表现为刚发的通知查不到）。
 
 **顺带**
 

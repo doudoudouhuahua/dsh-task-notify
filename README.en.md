@@ -13,7 +13,7 @@ icon), plus optional PushPlus push to your phone, so you hear about it even with
 
 *The desktop channel in the wild: title + session name / time / status, with the DeepSeek icon and the system sound.*
 
-![version](https://img.shields.io/badge/version-1.8.0-2f81f7?style=flat-square)
+![version](https://img.shields.io/badge/version-1.8.1-2f81f7?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-3fb950?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?style=flat-square)
 ![DSH](https://img.shields.io/badge/DSH%20Web-%E2%89%A5%200.1.6--alpha.1-8957e5?style=flat-square)
@@ -90,7 +90,7 @@ The detailed documentation is written in Chinese; this file is the English entry
 | [测试与验收](docs/testing.md) | Acceptance table, the contract verification script and recorded results |
 | [DSH 升级后插件失效的排查手册](docs/troubleshooting.md) | Failure shapes, evidence sources, case studies, high-risk break points |
 | [构建与开发](docs/development.md) | Directory layout, build and sync flow, implementation notes, known limits |
-| [版本历史](docs/changelog.md) | Every change from 1.1.0 to 1.8.0 |
+| [版本历史](docs/changelog.md) | Every change from 1.1.0 to 1.8.1 |
 
 ## License
 

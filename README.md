@@ -12,7 +12,7 @@ DeepSeek 图标），可选 PushPlus 微信推送——浏览器关闭也能收�
 
 *桌面通道实拍：标题 + 会话名 / 时间 / 状态，带 DeepSeek 图标与系统提示音。*
 
-![version](https://img.shields.io/badge/version-1.8.0-2f81f7?style=flat-square)
+![version](https://img.shields.io/badge/version-1.8.1-2f81f7?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-3fb950?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?style=flat-square)
 ![DSH](https://img.shields.io/badge/DSH%20Web-%E2%89%A5%200.1.6--alpha.1-8957e5?style=flat-square)
@@ -82,7 +82,7 @@ DeepSeek 图标），可选 PushPlus 微信推送——浏览器关闭也能收�
 | [测试与验收](docs/testing.md) | 逐条验收表、契约校验脚本与实测记录 |
 | [DSH 升级后插件失效的排查手册](docs/troubleshooting.md) | 失效形态判定、证据来源、案例复盘、高频破坏点与排查清单 |
 | [构建与开发](docs/development.md) | 目录结构、构建与同步流程、实现要点与已知限制 |
-| [版本历史](docs/changelog.md) | 1.1.0 → 1.8.0 全部变更 |
+| [版本历史](docs/changelog.md) | 1.1.0 → 1.8.1 全部变更 |
 
 ## 许可
 

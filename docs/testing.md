@@ -25,7 +25,7 @@
 | v1.6.1 | 已在宿主侧以「假 Cordis 上下文 + 假事件」回归验证上表全部触发条件与状态文案（见[版本历史](changelog.md)） |
 | v1.7.0 | 该回归已固化为可执行脚本 `tools/verify-contract.mjs`（26 项检查全通过，见下节） |
 | v1.8.0 | 脚本扩展为 31 项检查，新增语言五项（默认中文、英文切换、关注类文案、未知语言回退、testNotify 语言入参）与 `testNotify` 参数契约 |
-| v1.8.0 | **通知图标静默回退**：`verify-contract.mjs` 只断言「toast 送达」（exit 0），而图标被替换时命令**仍然 exit 0**，因此 31 项检查全通过也发现不了。已新增 `tools/check-toast-icon.mjs` 直接读 Windows 通知数据库比对**实际记录的图片路径**，并做了负向对照（把变体顺序改回 `plain` 优先即 FAIL，见下节） |
+| v1.8.1 | **通知图标静默回退**：`verify-contract.mjs` 只断言「toast 送达」（exit 0），而图标被替换时命令**仍然 exit 0**，因此 31 项检查全通过也发现不了。已新增 `tools/check-toast-icon.mjs` 直接读 Windows 通知数据库比对**实际记录的图片路径**，并做了负向对照（把变体顺序改回 `plain` 优先即 FAIL，见下节） |
 
 ## 契约校验（v1.7.0+）
 
@@ -63,7 +63,7 @@ $env:DSH_HARNESS = 'D:\path\to\deepseek-harness'; node tools/verify-contract.mjs
 替换 `node_modules\dsh-task-notify\deepseek.png`（或仓库根目录的 `deepseek.png`，取决于 `file:` 依赖
 是否软链）后，点「测试 Windows 通知」即可验证 toast 角标已换成新图标，无需重建插件或重启 DSH。
 
-## 图标回归检查（v1.8.0+）
+## 图标回归检查（v1.8.1+）
 
 「toast 弹出来了」**不等于**「图标是对的」。BurntToast 的 `New-BTImage` 声明了
 `[string] $Source = $Script:DefaultImage`，而 `New-BurntToastNotification` 在 `-AppLogo` 为空时
@@ -87,7 +87,7 @@ npm run verify:icon                 # 等价于上面第二条
   会读到过期历史（表现为「刚发的通知查不到」）。脚本会把 `-wal` / `-shm` 一起拷贝；
 - 变体顺序是**功能性**的：`TOAST_VARIANTS` 必须把带 `-AppLogo` 的变体排在前面，因为
   `showWindowsToast` 以「首个 exit 0」为准返回，`plain` 变体没有任何可失败之处，排在首位
-  就必然成功，logo 永远不会被传下去（1.8.0 曾如此，31 项契约检查全绿也照样静默回退）。
+  就必然成功，logo 永远不会被传下去（1.8.0 曾如此，31 项契约检查全绿也照样静默回退，1.8.1 修复）。
 
 > **宿主半改了必须重启 DSH**：`lib/index.js` 是被 ESM 在进程启动时导入的，改完同步进 profile
 > 后，**只有重启 DSH 才会生效**——运行中的进程仍持有旧模块。判断办法：对比 DSH 进程启动时间与
