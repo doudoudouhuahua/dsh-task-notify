@@ -92,6 +92,23 @@ const testResultSchema = {
 }
 
 /**
+ * The optional language argument of `testNotify`. The panel sends the language
+ * it is CURRENTLY rendering so its own "test Windows notification" button
+ * produces immediate feedback; an absent value (the host-side caller) resolves
+ * to the default. Deliberately lenient about absence and strict about bad
+ * values: the host callers never pass anything else, and a future language
+ * pack must not be able to break the endpoint.
+ */
+const LANG_DEFAULT = 'zh'
+const langSchema = {
+  parse(value) {
+    if (value === undefined || value === null) return LANG_DEFAULT
+    if (value === 'zh' || value === 'en') return value
+    fail('lang', "'zh' | 'en'")
+  },
+}
+
+/**
  * One STRICT codec descriptor for a hand-rolled schema.
  *
  * DSH materializes boundary schemas on first use, so a strict codec carries a
@@ -163,7 +180,14 @@ export const INVOCATIONS = [
     namespace: 'taskNotify',
     method: 'testNotify',
     invocation: { kind: 'direct' },
-    parameters: [],
+    parameters: [
+      {
+        name: 'lang',
+        wire: 'lang',
+        source: 'json',
+        codec: strictCodec('dsh-task-notify#TaskNotifyLanguage', langSchema),
+      },
+    ],
     result: strictCodec('dsh-task-notify#TaskNotifyTestResult', testResultSchema),
   },
 ]
@@ -185,7 +209,7 @@ export const TYPERT_MANIFEST = {
           { kind: 'method', name: 'updateSettings', signature: 'updateSettings(update: object): Promise<TaskNotifySettings>' },
           { kind: 'method', name: 'next', signature: 'next(): TaskNotifyItem[]' },
           { kind: 'method', name: 'testPush', signature: 'testPush(): Promise<{ ok: boolean; error?: string }>' },
-          { kind: 'method', name: 'testNotify', signature: 'testNotify(): Promise<{ ok: boolean; error?: string }>' },
+          { kind: 'method', name: 'testNotify', signature: "testNotify(lang?: 'zh' | 'en'): Promise<{ ok: boolean; error?: string }>" },
         ],
         types: [],
       },

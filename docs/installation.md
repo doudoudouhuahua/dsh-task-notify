@@ -8,14 +8,28 @@
 | --- | --- |
 | 操作系统 | Windows 10 / 11 |
 | 宿主 | DSH Web（profile 插件机制），**≥ 0.1.6-alpha.1** |
-| 运行依赖 | PowerShell 7（`pwsh`）+ BurntToast 模块 |
+| 运行依赖 | PowerShell 7（`pwsh`）；BurntToast 模块由插件自动安装 |
 
 通知由 BurntToast 的 `New-BurntToastNotification` 经 `pwsh.exe` 发出，模块必须装在 **PowerShell 7
-的模块路径**下（Windows PowerShell 5.1 看不到它）：
+的模块路径**下（Windows PowerShell 5.1 看不到它）。插件会自己保证这一点：
 
-```powershell
-Install-Module BurntToast -Scope CurrentUser
-```
+- 插件激活后**后台探测**一次；`pwsh` 能导入 BurntToast 时不做任何事（已装机器上零打扰）；
+- 导入失败时**自动安装**（当前用户范围、免管理员）：
+
+  ```powershell
+  Install-Module BurntToast -Scope CurrentUser -Force -AllowClobber
+  ```
+
+  先装最新版，失败再钉 `-RequiredVersion 1.1.0`；装完在同一次调用里重新导入校验；
+- 安装**每个进程最多一次**：失败会被记住，不会每条通知都去联网重试；失败原因按语言写进宿主日志
+  （`[dsh-task-notify] BurntToast install failed …`）并出现在「测试 Windows 通知」的失败提示里；
+- `pwsh.exe` 不在 PATH 时不会尝试安装，而是直接报「未找到 PowerShell 7」——PowerShell 本身无法由
+  插件代装；
+- 想手工预装（例如无外网、需要离线分发）：
+
+  ```powershell
+  Install-Module BurntToast -Scope CurrentUser
+  ```
 
 ## 方式 A：git 源直装（推荐）
 
@@ -59,7 +73,7 @@ dsh plugin --profile web remove dsh-task-notify
 | 启动报 `duplicate loader entry id: dsh-task-notify` | profile 的 `cordis.patch.yml` 重复注入了宿主行 | 删除 profile 中的该条目，只保留包内 bundle 补丁 |
 | 安装以 `ERR_PNPM_IGNORED_BUILDS` 失败 | pnpm 拦截了依赖的构建脚本 | 按 pnpm 提示把对应键加入 profile 的 `allowBuilds`，再重跑安装 |
 | 更新源码后行为不变 | pnpm 对 `file:` 依赖按内容拷贝 | 重新 `pnpm install`，或手动同步 `lib/*.js`（见[构建与开发](development.md)） |
-| 点「测试 Windows 通知」失败或没有任何弹窗 | BurntToast 未装在 pwsh 模块路径，或 `pwsh.exe` 不在 PATH | 在 pwsh 中重装模块并确认 `pwsh -v` 可用；宿主日志会打印 `windows toast failed:` / `toast spawn failed:`；`verify-contract.mjs` 的「Windows toast 通道」一项也会报出真实原因 |
+| 点「测试 Windows 通知」失败或没有任何弹窗 | BurntToast 未装在 pwsh 模块路径且自动安装失败，或 `pwsh.exe` 不在 PATH | 先看宿主日志：`BurntToast missing — installing it for the current user` 表示正在自动安装，紧随其后的 `install failed …` 带真实原因（无外网、PSGallery 不可达、模块被策略拦截等），此时按上面的命令手工安装即可；`未找到 PowerShell 7（pwsh.exe）` 则是 `pwsh -v` 不可用，需要先装 PowerShell 7。`verify-contract.mjs` 的「testNotify」一项也会报出真实原因 |
 
 ## 相关文档
 

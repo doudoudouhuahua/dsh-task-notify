@@ -15,21 +15,29 @@
  * notification, no bell, no settings panel.
  *
  * Checks, in order:
- *   1. the strict codec contract — every descriptor exposes `create()`, and the
- *      schemas parse valid values and reject malformed ones;
+ *   1. the strict codec contract — every descriptor exposes `create()`, the
+ *      schemas parse valid values and reject malformed ones, and `testNotify`
+ *      carries its one optional language parameter;
  *   2. the real `TypertRegistry` accepts the host manifest and registers all
  *      five `taskNotify/*` endpoints (the exact call that used to throw);
  *   3. the built host half applies against a fake Cordis context and every
  *      notification path (approval / question / plan / goal / agent /
  *      subagent / workflow) reaches the queue with its documented label,
  *      including the switches that gate them;
- *   4. a negative control: a `schema`-only codec must still be rejected, so
+ *   4. localization — every label is Chinese until a locale snapshot says
+ *      otherwise, an English locale switches the whole payload, an unmapped
+ *      language falls back to English, and the language stays a HOST concern
+ *      (it is what renders the toast and the push body);
+ *   5. a negative control: a `schema`-only codec must still be rejected, so
  *      this check keeps detecting the same drift in the future.
  *
  * Every checked notification also fires a real `pwsh.exe`/BurntToast attempt to
  * the Windows notification centre; a refused spawn or a missing BurntToast
  * module is reported at the end but never fails the run, because the plugin
- * treats both as non-fatal by design.
+ * treats both as non-fatal by design. That final probe is also where the
+ * automatic BurntToast install shows up: a machine without the module logs
+ * `BurntToast missing — installing it for the current user` and the toast
+ * result then reports the outcome.
  *
  * Environment:
  *   DSH_HARNESS / DSH_REPO       Harness checkout to resolve DSH packages from.
@@ -293,6 +301,27 @@ await check('test-result codec validates the { ok, error? } outcome', () => {
   if (schema.parse({ ok: false, error: 'x' }).error !== 'x') throw new Error('error was not preserved')
   if (!rejects((value) => schema.parse(value), { ok: 'yes' })) throw new Error('a non-boolean ok was accepted')
   return 'round trip + rejection'
+})
+
+await check('testNotify carries one optional language parameter', () => {
+  const descriptor = INVOCATIONS.find((entry) => entry.method === 'testNotify')
+  if (descriptor === undefined) throw new Error('no testNotify descriptor')
+  if (descriptor.parameters.length !== 1) {
+    throw new Error(`expected exactly 1 parameter, found ${descriptor.parameters.length}`)
+  }
+  const parameter = descriptor.parameters[0]
+  if (parameter.name !== 'lang' || parameter.wire !== 'lang' || parameter.source !== 'json') {
+    throw new Error(`unexpected parameter ${JSON.stringify({ name: parameter.name, wire: parameter.wire, source: parameter.source })}`)
+  }
+  const schema = parameter.codec.create()
+  if (schema.parse('en') !== 'en') throw new Error("'en' was not preserved")
+  if (schema.parse('zh') !== 'zh') throw new Error("'zh' was not preserved")
+  // Absent on the host-side call path; it must resolve, not throw.
+  if (schema.parse(undefined) !== 'zh') throw new Error('an absent language did not default to zh')
+  if (!rejects((value) => schema.parse(value), 'ja')) {
+    throw new Error('a language this plugin carries no copy for was accepted')
+  }
+  return "lang: 'zh' | 'en' (default zh)"
 })
 
 /* ── 2. the real TypertRegistry accepts the host manifest ─────────────────── */
@@ -615,19 +644,101 @@ await check('the settings scope round-trips a write', async () => {
 })
 
 /*
- * The desktop channel, end to end: `testNotify` runs one real
- * `pwsh.exe`/BurntToast call and reports its outcome, so this proves the
- * delivery path without a toast assertion that could hang on a headless box.
- * A refusal (missing pwsh, missing BurntToast, blocked spawn) is reported, not
- * failed — the plugin treats it as non-fatal by design.
+ * Localization. The host renders every toast and PushPlus body, so the
+ * LANGUAGE is a host-side concern: it resolves the shared locale preference
+ * and must fall back to Chinese whenever that service (or its snapshot) is
+ * unavailable — a headless composition has no locale service at all. The
+ * assertions drive real events and read the queue, i.e. exactly the fields the
+ * toast and the push body are built from.
  */
-const toastOutcome = await runtime.testNotify()
+let fakeLang = null
+pluginCtx.provide('locale', {
+  getLocale: () => (fakeLang === null ? undefined : { active: fakeLang, locales: [], revision: 0 }),
+  subscribe: () => () => {},
+})
 
-await check('the Windows toast channel is reachable', () => {
-  if (typeof toastOutcome !== 'object' || toastOutcome === null || typeof toastOutcome.ok !== 'boolean') {
-    throw new Error(`testNotify returned ${JSON.stringify(toastOutcome)}`)
+await check('without a locale snapshot every label stays Chinese', () => {
+  fakeLang = null
+  // No `provider`, so this also pins the subagent FALLBACK title: the payload
+  // a session-less completion produces.
+  emitSubagentEnd({ id: 'lang-default', stopReason: 'completed' })
+  emitWorkflowEnd({ id: 'lang-default-wf' })
+  const items = new Map(runtime.next().map((item) => [item.kind, item]))
+  const subagent = items.get('subagent')
+  const workflow = items.get('workflow')
+  if (subagent?.status !== '完成') throw new Error(`subagent status ${JSON.stringify(subagent?.status)}`)
+  if (subagent?.title !== '子代理') throw new Error(`subagent fallback title ${JSON.stringify(subagent?.title)}`)
+  if (workflow?.title !== '工作流') throw new Error(`workflow fallback title ${JSON.stringify(workflow?.title)}`)
+  return 'completed → 完成, 子代理 / 工作流 fallbacks'
+})
+
+await check('an English locale switches the host copy', () => {
+  fakeLang = 'en'
+  emitSubagentEnd({ id: 'lang-en', stopReason: 'completed' })
+  emitWorkflowEnd({ id: 'lang-en-wf' })
+  const items = new Map(runtime.next().map((item) => [item.kind, item]))
+  const subagent = items.get('subagent')
+  const workflow = items.get('workflow')
+  if (subagent?.status !== 'Completed') throw new Error(`subagent status ${JSON.stringify(subagent?.status)}`)
+  if (subagent?.title !== 'Subagent') throw new Error(`subagent fallback title ${JSON.stringify(subagent?.title)}`)
+  if (workflow?.title !== 'Workflow') throw new Error(`workflow fallback title ${JSON.stringify(workflow?.title)}`)
+  return 'completed → Completed, Subagent / Workflow fallbacks'
+})
+
+await check('the attention channels localize their status and detail lines', () => {
+  fakeLang = 'en'
+  sessionEvent(rootSession, {
+    type: 'approval/asked',
+    data: { id: 'ap-lang', toolName: 'pwsh', reason: 'escalation' },
+  })
+  sessionEvent(rootSession, {
+    type: 'tool/call',
+    data: { name: 'ask_user_question', callId: 'call-lang', arguments: '{}' },
+  })
+  const items = runtime.next()
+  const approval = items.find((item) => item.kind === 'approval')
+  const question = items.find((item) => item.kind === 'question')
+  if (approval?.status !== 'Approval required') throw new Error(`approval status ${JSON.stringify(approval?.status)}`)
+  if (approval?.detail !== 'Tool: pwsh, reason: escalation') throw new Error(`approval detail ${JSON.stringify(approval?.detail)}`)
+  if (approval?.title !== 'Agent session') throw new Error(`approval title ${JSON.stringify(approval?.title)}`)
+  if (question?.status !== 'Waiting for your answer') throw new Error(`question status ${JSON.stringify(question?.status)}`)
+  if (question?.detail !== '(open the app to view)') throw new Error(`question detail ${JSON.stringify(question?.detail)}`)
+  return 'Approval required / Waiting for your answer / Tool: …'
+})
+
+await check('a language without copy of its own falls back to English', () => {
+  fakeLang = 'ja'
+  emitSubagentEnd({ id: 'lang-ja', stopReason: 'completed' })
+  const subagent = runtime.next().find((item) => item.kind === 'subagent')
+  if (subagent?.status !== 'Completed') throw new Error(`subagent status ${JSON.stringify(subagent?.status)}`)
+  return 'ja → Completed'
+})
+
+await check('testNotify uses the language the caller passes', async () => {
+  /*
+   * The desktop channel, end to end: `testNotify` runs real
+   * `pwsh.exe`/BurntToast calls and reports their outcomes, so this proves the
+   * delivery path without a toast assertion that could hang on a headless box.
+   * The optional language argument is what the panel sends, so its own test
+   * button matches the slider immediately; `ja` resolves through the same
+   * normalizer as an English locale. A refusal (missing pwsh, missing
+   * BurntToast, blocked spawn) is REPORTED, not failed — the plugin treats it
+   * as non-fatal by design.
+   */
+  const english = await runtime.testNotify('en')
+  const chinese = await runtime.testNotify('zh')
+  for (const [label, outcome] of [['en', english], ['zh', chinese]]) {
+    if (typeof outcome !== 'object' || outcome === null || typeof outcome.ok !== 'boolean') {
+      throw new Error(`testNotify('${label}') returned ${JSON.stringify(outcome)}`)
+    }
+    if (outcome.ok !== true && String(outcome.error ?? '') === '') {
+      throw new Error(`testNotify('${label}') failed without a reason`)
+    }
   }
-  return toastOutcome.ok === true ? 'pwsh + BurntToast delivered' : `unavailable (${String(toastOutcome.error)})`
+  const report = (outcome) => (outcome.ok === true
+    ? 'pwsh + BurntToast delivered'
+    : `unavailable (${String(outcome.error).split('\n')[0]})`)
+  return `en → ${report(english)}, zh → ${report(chinese)}`
 })
 
 /* ── 4. negative control ──────────────────────────────────────────────────── */

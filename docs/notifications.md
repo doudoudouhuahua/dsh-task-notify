@@ -34,11 +34,22 @@
 
 | 通道 | 实现 | 特点 |
 | --- | --- | --- |
-| Windows 系统通知 | BurntToast（`New-BurntToastNotification`，由 `pwsh.exe` 调用） | 系统提示音 + DeepSeek 图标，无需网页授权，浏览器关闭也能收到 |
+| Windows 系统通知 | BurntToast（`New-BurntToastNotification`，由 `pwsh.exe` 调用） | 系统提示音 + DeepSeek 图标，无需网页授权，浏览器关闭也能收到；模块缺失时插件自动安装 |
 | 手机推送 | PushPlus `send` 接口 | 电脑不在身边也能收到 |
 
 BurntToast 的 `-Text` 最多接受 3 条（粗体标题 + 2 行正文），更多正文行会折进最后一条；
 toast 弹出失败时不会抛出，只在宿主日志记录错误。
+
+### 文案语言
+
+标题、正文与状态文案都由**宿主**渲染，语言取 DSH 的语言偏好（面板头部滑块 =「设置 → 通用 → 语言」）；
+读取不到该状态时一律使用中文。中英对照见 `src/i18n.js`，正文标签（会话 / 时间 / 描述）也随语言变化：
+
+```
+会话：测试会话                      Session: Test session
+时间：2026/9/15 19:43:39     ↔     Time: 2026/9/15 19:43:39
+描述：Windows 通知正常              Status: Windows notifications are working
+```
 
 ### 图标热更新
 

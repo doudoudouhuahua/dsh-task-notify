@@ -8,16 +8,27 @@
  * configuration survives process restarts. The client half ships in the same
  * package (`./client`); the web server serves it under
  * /plugins/dsh-task-notify/client.js.
+ *
+ * Two payloads are localized here, because the HOST is what renders them:
+ * the Windows toast and the PushPlus body. The language is the DSH locale
+ * preference (`ctx.get('locale')` — the client half of the locale plugin owns
+ * that state), read per notification; Chinese is the fallback whenever the
+ * service or its state is unavailable.
+ *
+ * The toast channel also installs its own dependency: when `pwsh` cannot
+ * import BurntToast, the plugin installs the module (CurrentUser scope, no
+ * admin) and retries that one notification.
  */
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import z from '@deepseek-ai/schemastery'
 import { createHash } from 'node:crypto'
-import { copyFileSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { INVOCATIONS, TYPERT_MANIFEST } from './contract.js'
+import { DEFAULT_LANG, bodyLines, kindTitle, normalizeLang, statusLabel, t } from './i18n.js'
 
 /** Cordis plugin name (the Loader entry and client bundle id). */
 export const name = 'dsh-task-notify'
@@ -30,6 +41,10 @@ export const inject = ['typert', 'settings']
  * (2026-08-30 refactor removed the `settingsNamespace(...)` helper from
  * @deepseek-ai/dsh-settings — `ctx.settings.register` accepts the string
  * directly). The namespace is unchanged, so stored settings carry over.
+ *
+ * The language preference deliberately does NOT live here: DSH's locale
+ * service already owns one durable preference (`locale.preference`), and the
+ * panel slider and 「设置 → 通用 → 语言」 are the same switch.
  */
 const NS = 'task-notify'
 
@@ -49,9 +64,30 @@ const ICON_SOURCE = fileURLToPath(new URL('../deepseek.png', import.meta.url))
  * forces the OS to render the new image. Fallbacks: the last known temp copy
  * when the source is momentarily unreadable, no AppLogo at all when no copy
  * exists yet.
+ *
+ * The directory is the CANONICAL path, not `tmpdir()`'s raw value: a Windows
+ * TEMP inherited as an 8.3 short name (`C:\Users\V5611~1.REA\...`) is what the
+ * toast's `AppLogo` would otherwise carry, and the toast system answers an
+ * image source it cannot resolve by silently falling back to the module's own
+ * default picture (the BurntToast toast photo) instead of the app logo.
  */
-const ICON_TMP_DIR = join(tmpdir(), 'dsh-task-notify-icons')
+const ICON_TMP_DIR = resolveCanonical(join(tmpdir(), 'dsh-task-notify-icons'))
 let iconCache = { fingerprint: null, path: null }
+
+/**
+ * Expand 8.3 short names and relative segments into the one absolute form the
+ * toast renderer resolves reliably. Best effort: a path that cannot be
+ * canonicalized (not yet created, unusual filesystem) is used as-is.
+ * @param path - candidate path, possibly carrying `~1` segments.
+ * @returns the canonical absolute path when resolvable, else the input.
+ */
+function resolveCanonical(path) {
+  try {
+    return realpathSync.native(path)
+  } catch {
+    return path
+  }
+}
 
 const iconFingerprint = () => {
   try {
@@ -70,6 +106,9 @@ const resolveToastIcon = () => {
     mkdirSync(ICON_TMP_DIR, { recursive: true })
     path = join(ICON_TMP_DIR, 'deepseek-' + fingerprint.slice(0, 12) + '.png')
     copyFileSync(ICON_SOURCE, path)
+    // Re-resolve after the copy: the directory now certainly exists, so a
+    // short-named TEMP still yields a long path for the toast to consume.
+    path = resolveCanonical(path)
     // Drop temp copies of earlier icon versions.
     for (const entry of readdirSync(ICON_TMP_DIR)) {
       if (entry === basename(path)) continue
@@ -98,50 +137,236 @@ const SettingsSchema = z.object({
   goal: z.boolean().default(true),
 })
 
-/** Per-kind toast / push title. */
-const kindTitle = (kind) =>
-  kind === 'approval' ? '需要你的审批'
-    : kind === 'question' ? 'Agent 正在问你'
-      : kind === 'plan' ? '计划待你确认'
-        : kind === 'goal' ? '目标受阻'
-          : 'Agent任务完成'
+/**
+ * Language the HOST is currently rendering in. Chinese until proven otherwise:
+ * a headless composition has no locale service at all, and that must degrade
+ * to the shipped default rather than to an empty label.
+ */
+let lang = DEFAULT_LANG
 
-/** '2026/8/17 13:37:53' */
-const fmtDate = (at) => {
-  const d = new Date(at)
-  const p = (n) => (n < 10 ? '0' + n : String(n))
-  return d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate()
-    + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+/**
+ * Adopt the locale service's active language, if this composition has one.
+ * `@deepseek-ai/dsh-client-locale` provides `locale` on the CLIENT face only,
+ * so the host resolves it lazily and tolerates both an absent service and an
+ * absent snapshot.
+ * @param ctx - host cordis context.
+ * @returns the language now in force.
+ */
+const syncLang = (ctx) => {
+  try {
+    const active = ctx.get('locale')?.getLocale?.()?.active
+    lang = typeof active === 'string' && active !== '' ? normalizeLang(active) : DEFAULT_LANG
+  } catch {
+    // A foreign or partially mounted locale service must never mute the toast.
+    lang = DEFAULT_LANG
+  }
+  return lang
 }
 
-const STATUS_TEXT = {
-  completed: '完成',
-  aborted: '中止',
-  error: '失败',
-  'max-tokens': '超出上限',
-  refusal: '拒绝',
-  cancelled: '取消',
-  blocked: '阻塞',
-  interrupted: '中断',
-  结束: '结束',
-  需要审批: '需要审批',
-  等待回答: '等待回答',
-  等待确认: '等待确认',
-  需要处理: '需要处理',
-}
-const statusLabel = (status) => STATUS_TEXT[status] ?? String(status)
+/* ── the desktop channel: pwsh + BurntToast ─────────────────────────────────── */
 
-/** The push content template lines: 会话 / 时间 / 描述 (+ optional detail). */
-const bodyLines = (item) => {
-  const lines = [
-    '会话：' + item.title,
-    '时间：' + fmtDate(item.at),
-    '描述：' + statusLabel(item.status),
-  ]
-  if (typeof item.detail === 'string' && item.detail !== '') lines.push(item.detail)
-  return lines
+/**
+ * BurntToast dependency state, resolved at most once per process:
+ * `ready` means `Import-Module BurntToast` + `New-BurntToastNotification`
+ * resolved inside `pwsh`; `unavailable` carries the reason to report.
+ */
+const burntToast = { state: 'unknown', detail: '' }
+
+/**
+ * One `pwsh -Command` run with a hard timeout. `stdio: 'ignore'` keeps the
+ * child from inheriting a console window, the stderr pipe is drained (and
+ * capped) purely so a failure can be reported, and the timer bounds a child
+ * that never exits (a hung gallery request). The plugin fires a handful of
+ * toasts per turn, so the leaked timer of a genuinely hung child is not worth
+ * a process-wide registry.
+ * @param script - the command text to run.
+ * @param timeoutMs - kill the child after this long.
+ * @returns `{ code, stderr, timedOut }`; `code` is null when the child was
+ *   killed or could not be spawned at all.
+ */
+const runPwsh = (script, timeoutMs) => new Promise((resolve) => {
+  let child
+  try {
+    child = spawn('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+  } catch (error) {
+    resolve({ code: null, stderr: String(error?.message ?? error), timedOut: false })
+    return
+  }
+  let stderr = ''
+  let settled = false
+  const finish = (result) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    resolve(result)
+  }
+  const timer = setTimeout(() => {
+    // Best effort: a killed child settles through the exit handler, but the
+    // caller must not wait on that.
+    try { child.kill() } catch { /* 忽略 */ }
+    finish({ code: null, stderr: stderr.trim(), timedOut: true })
+  }, timeoutMs)
+  child.stderr?.on('data', (chunk) => {
+    if (stderr.length < 4000) stderr += String(chunk)
+  })
+  child.on('error', (error) => {
+    finish({ code: null, stderr: String(error?.message ?? error), timedOut: false })
+  })
+  child.on('exit', (code) => {
+    finish({ code, stderr: stderr.trim(), timedOut: false })
+  })
+})
+
+/** Exit-code protocol: `exit 3` means "BurntToast could not be imported". */
+const EXIT_NO_MODULE = 3
+
+/**
+ * Modifier combinations the toast script is emitted under, in attempt order.
+ *
+ * The logo-carrying variants come FIRST, and that ordering is load-bearing:
+ * `showWindowsToast` returns on the first exit code 0, so whichever variant
+ * leads wins every toast. A leading `plain` variant has nothing to fail on, so
+ * it would succeed unconditionally and the logo would never be passed — every
+ * toast would then silently carry BurntToast's own default picture, because its
+ * `New-BTImage` falls back to `$Script:DefaultImage` when `-AppLogo` is absent.
+ *
+ * `resolveToastIcon()` returning null (no icon source, no cached copy) already
+ * disables `-AppLogo` for every variant, so the logo-less variants stay purely
+ * as a retry path for a module that rejects the argument.
+ */
+const TOAST_VARIANTS = [
+  { name: 'icon', alog: true, pin: false },
+  { name: 'plain', alog: false, pin: false },
+  { name: 'icon-pinned', alog: true, pin: true },
+  { name: 'plain-pinned', alog: false, pin: true },
+]
+
+/**
+ * The toast script: import BurntToast or report it missing (exit 3), build the
+ * toast or (exit 4) report that, and retry the pinned 1.1.0 signature when the
+ * local install does not carry the expected parameters.
+ * @param textsB64 - base64(UTF-8 JSON) of the `-Text` array, so no toast
+ *   content is ever interpolated into the command text.
+ * @param icon - absolute AppLogo path, or null to omit the logo.
+ * @param alog - whether this variant passes `-AppLogo`.
+ * @param pin - whether this variant pins the BurntToast version.
+ * @returns the `-Command` text.
+ */
+const toastScript = (textsB64, icon, alog, pin) => {
+  // `-AppLogo` takes a path BurntToast VALIDATES with Test-Path before it
+  // builds the toast, and a path it cannot resolve makes it fall back to its
+  // own default picture (the BurntToast toast photo) with only a warning.
+  // So the value must stay a plain, canonical path: no query string and no
+  // 8.3 short names. Versioning rides the content-addressed FILENAME instead.
+  const args = 'New-BurntToastNotification -Text $t' + (alog && icon !== null ? ` -AppLogo '${icon}'` : '')
+  const open = pin ? "Import-Module BurntToast -RequiredVersion 1.1.0 -ErrorAction Stop" : 'Import-Module BurntToast -ErrorAction Stop'
+  return [
+    '$ErrorActionPreference = "Stop"',
+    `try { ${open} } catch { exit ${EXIT_NO_MODULE} }`,
+    'try { Get-Command New-BurntToastNotification -ErrorAction Stop | Out-Null }'
+      + ` catch { exit ${EXIT_NO_MODULE} }`,
+    `$t=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${textsB64}')) | ConvertFrom-Json`,
+    `try { ${args} } catch { Write-Error $_; exit 4 }`,
+    'exit 0',
+  ].join('; ')
 }
-const pushBody = (item) => bodyLines(item).join('\n')
+
+/**
+ * Install the BurntToast module into the CURRENT USER module path and verify
+ * it is importable in the same box. `$ErrorActionPreference='Stop'` plus
+ * `-Force` keep PowerShell Gallery's "untrusted repository / are you sure"
+ * prompts from blocking a windowless host forever. The pinned 1.1.0 fallback
+ * covers a gallery state where the latest release is absent or unusable.
+ * @returns the install script text.
+ */
+const installScript = () => [
+  '$ErrorActionPreference = "Stop"',
+  '$ProgressPreference = "SilentlyContinue"',
+  'try { Import-Module BurntToast -ErrorAction Stop; exit 0 } catch { }',
+  'try { Install-Module BurntToast -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop }',
+  ' catch {',
+  '  try { Install-Module BurntToast -Scope CurrentUser -Force -AllowClobber -RequiredVersion 1.1.0 -ErrorAction Stop }',
+  "  catch { Write-Error ('install failed: ' + $_.Exception.Message); exit 2 }",
+  ' }',
+  'try { Import-Module BurntToast -ErrorAction Stop; Get-Command New-BurntToastNotification -ErrorAction Stop | Out-Null; exit 0 }',
+  " catch { Write-Error ('installed but unusable: ' + $_.Exception.Message); exit 4 }",
+].join('; ')
+
+/**
+ * Whether `pwsh` can import BurntToast and resolve its cmdlet. Probed once per
+ * process, on the first toast and in the background right after `apply()`.
+ * @returns true when the module is usable.
+ */
+const probeBurntToast = async () => {
+  if (burntToast.state === 'ready') return true
+  const probe = await runPwsh(
+    `$ErrorActionPreference = "Stop"; `
+    + `try { Import-Module BurntToast -ErrorAction Stop } catch { exit ${EXIT_NO_MODULE} }; `
+    + `try { Get-Command New-BurntToastNotification -ErrorAction Stop | Out-Null } catch { exit ${EXIT_NO_MODULE} }; `
+    + 'exit 0',
+    30000,
+  )
+  if (probe.code === EXIT_NO_MODULE) {
+    burntToast.state = 'unavailable'
+    burntToast.detail = probe.stderr
+    return false
+  }
+  // Any other exit means "not importable" too (EACCES, a broken profile, a
+  // killed process); the reason is kept for the error text.
+  burntToast.state = probe.code === 0 ? 'ready' : 'unavailable'
+  burntToast.detail = probe.stderr
+  return burntToast.state === 'ready'
+}
+
+/** Pending background probe, so the first toast can wait instead of failing. */
+let burntToastProbe = null
+
+/**
+ * Make BurntToast usable, installing it when `pwsh` reports it missing. Runs
+ * at most ONE install per process: a failed install is cached, so a broken
+ * machine does not re-run a network install on every notification.
+ * @returns `{ ok, reason }` — `reason` is the detail to report on failure.
+ */
+const ensureBurntToast = async () => {
+  if (await probeBurntToast()) {
+    return { ok: true, reason: '' }
+  }
+  // A repeated call while the first install attempt is still running joins it.
+  if (burntToast.installing === undefined) {
+    burntToast.installing = (async () => {
+      console.error('[dsh-task-notify] BurntToast missing — installing it for the current user')
+      const probe = await runPwsh(installScript(), 240000)
+      if (probe.timedOut) {
+        console.error('[dsh-task-notify] BurntToast install timed out')
+        return false
+      }
+      const ok = probe.code === 0 && await probeBurntToast()
+      console.error(ok
+        ? '[dsh-task-notify] BurntToast installed'
+        : `[dsh-task-notify] BurntToast install failed (exit ${String(probe.code)}): ${probe.stderr}`)
+      return ok
+    })()
+  }
+  const ok = await burntToast.installing
+  if (ok) return { ok: true, reason: '' }
+  return {
+    ok: false,
+    // The probe detail is the real pwsh message; without one (a timeout, or a
+    // probe that never ran) the generic text is still actionable.
+    reason: burntToast.detail !== ''
+      ? burntToast.detail
+      : t(lang, 'host.toast.installTimeout'),
+  }
+}
+
+/** Kick the dependency check off without blocking plugin activation. */
+const warmBurntToast = () => {
+  if (burntToastProbe !== null || burntToast.state !== 'unknown') return
+  burntToastProbe = ensureBurntToast().catch(() => ({ ok: false, reason: '' }))
+}
 
 /**
  * Show a REAL Windows toast notification through the BurntToast PowerShell
@@ -149,9 +374,13 @@ const pushBody = (item) => bodyLines(item).join('\n')
  * BurntToast module lives in the pwsh module path, Windows PowerShell 5.1
  * does not see it). The toast carries the DeepSeek app logo (deepseek.png,
  * re-resolved per toast so replaced icons apply immediately) and the OS plays
- * its default notification sound. Fails quietly (never throws).
+ * its default notification sound. A missing BurntToast module is installed on
+ * the spot and the toast is retried once. Never throws.
+ * @param title - localized bold title line.
+ * @param lines - localized body lines (folded to BurntToast's 3-entry limit).
+ * @returns `{ ok, error? }`.
  */
-const showWindowsToast = (title, lines) => new Promise((resolve) => {
+const showWindowsToast = async (title, lines) => {
   // BurntToast's -Text accepts at most 3 entries: bold title + 2 body lines;
   // fold any extra body lines into the last entry, separated by a newline.
   const texts = [title, ...lines]
@@ -163,32 +392,43 @@ const showWindowsToast = (title, lines) => new Promise((resolve) => {
   // Fresh icon URI per content version (see resolveToastIcon), so a replaced
   // deepseek.png shows up on the next toast instead of a cached old image.
   const icon = resolveToastIcon()
-  const script = [
-    'Import-Module BurntToast',
-    `$t=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json`,
-    icon === null
-      ? 'New-BurntToastNotification -Text $t'
-      : `New-BurntToastNotification -Text $t -AppLogo '${icon}'`,
-  ].join(';')
-  try {
-    const child = spawn('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      windowsHide: true,
-      stdio: 'ignore',
-    })
-    child.on('error', (error) => {
-      console.error('[dsh-task-notify] toast spawn failed:', error)
-      resolve({ ok: false, error: String(error?.message ?? error) })
-    })
-    child.on('exit', (code) => {
-      resolve(code === 0 ? { ok: true } : { ok: false, error: 'powershell 退出码 ' + String(code) })
-    })
-  } catch (error) {
-    resolve({ ok: false, error: String(error?.message ?? error) })
+  // Join the startup probe instead of racing it: on a machine where the
+  // module is being installed right now, waiting beats dropping the toast.
+  if (burntToastProbe !== null) await burntToastProbe
+
+  let last = { ok: true }
+  for (const variant of TOAST_VARIANTS) {
+    const script = toastScript(payload, icon, variant.alog, variant.pin)
+    const probe = await runPwsh(script, 30000)
+    if (probe.code === 0) return { ok: true }
+    last = probe.code === null
+      ? {
+        ok: false,
+        error: probe.timedOut
+          ? t(lang, 'host.toast.timeout')
+          : t(lang, 'host.toast.pwshMissing'),
+      }
+      : {
+        ok: false,
+        error: probe.stderr !== ''
+          ? probe.stderr
+          : t(lang, 'host.toast.exitCode', { code: String(probe.code) }),
+      }
+    if (probe.code !== EXIT_NO_MODULE) return last
+    // Missing module: install once, then fall through to the pinned variants.
+    const installed = await ensureBurntToast()
+    if (!installed.ok) {
+      return {
+        ok: false,
+        error: t(lang, 'host.toast.moduleMissing', { reason: installed.reason }),
+      }
+    }
   }
-})
+  return last
+}
 
 /** Fire one PushPlus POST; resolves the API outcome, never throws. */
-async function pushToPushPlus(token, title, content) {
+async function pushToPushPlus(token, title, content, language) {
   let response
   try {
     response = await fetch('https://www.pushplus.plus/send', {
@@ -199,12 +439,12 @@ async function pushToPushPlus(token, title, content) {
     })
   } catch (error) {
     console.error('[dsh-task-notify] pushplus request failed:', error)
-    return { ok: false, error: '网络请求失败' }
+    return { ok: false, error: t(language, 'host.push.networkFailed') }
   }
   const text = await response.text()
   if (text.includes('code":200') || text.includes('code": 200')) return { ok: true }
   console.error('[dsh-task-notify] pushplus rejected:', text.slice(0, 200))
-  return { ok: false, error: '推送被拒绝（检查 Token）' }
+  return { ok: false, error: t(language, 'host.push.rejected') }
 }
 
 /**
@@ -238,12 +478,27 @@ class TaskNotifyRuntime extends TypertRemoteService {
 
   async testPush() {
     const s = this.settings.get()
-    if (!s.push || s.token === '') return { ok: false, error: '请先开启推送并填写 Token' }
-    return await pushToPushPlus(s.token, 'Agent任务完成', pushBody({ title: '测试会话', status: '测试消息', at: Date.now() }))
+    if (!s.push || s.token === '') return { ok: false, error: t(lang, 'host.test.pushDisabled') }
+    return await pushToPushPlus(s.token, kindTitle('done', lang), bodyLines({
+      title: t(lang, 'host.test.session'),
+      status: t(lang, 'host.test.message'),
+      at: Date.now(),
+    }, lang).join('\n'), lang)
   }
 
-  async testNotify() {
-    return await showWindowsToast('Agent任务完成', bodyLines({ title: '测试会话', status: 'Windows 通知正常', at: Date.now() }))
+  /**
+   * One real toast. The panel passes its CURRENT language so the test reflects
+   * the slider immediately instead of waiting for the next settings sync; a
+   * call without it falls back to the host's own resolution.
+   * @param language - optional `'zh'` | `'en'`.
+   */
+  async testNotify(language) {
+    const use = language === undefined || language === null ? lang : normalizeLang(language)
+    return await showWindowsToast(kindTitle('done', use), bodyLines({
+      title: t(use, 'host.test.session'),
+      status: t(use, 'host.test.notifyOk'),
+      at: Date.now(),
+    }, use))
   }
 }
 
@@ -254,6 +509,15 @@ class TaskNotifyRuntime extends TypertRemoteService {
 export function apply(ctx) {
   const settings = ctx.settings.register(NS, SettingsSchema, { applies: 'live' })
   const runtime = new TaskNotifyRuntime(ctx, settings)
+  syncLang(ctx)
+  // Keep the module-level language current for the callers that fire OUTSIDE
+  // an event handler (the two test channels): those must reflect a switch made
+  // while the plugin sat idle. The per-event paths read it themselves anyway.
+  ctx.on('locale/change', () => { syncLang(ctx) })
+  // Dependency warm-up: the module check (and, when missing, the install)
+  // runs in the background so the first real notification is not the first
+  // time the channel is exercised. Never blocks activation, never throws.
+  warmBurntToast()
 
   // Resolved lazily: a service that is not yet provided at apply time must not
   // be frozen into `undefined` for the whole process lifetime.
@@ -377,12 +641,14 @@ export function apply(ctx) {
   /** Label of the last `turn/end` reason for the session (fallback 结束). */
   const turnEndLabel = (session) => {
     const events = sessionLog(session)
+    const fallback = t(lang, 'host.status.ended')
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]
       if (event.type !== 'turn/end') continue
-      return STATUS_TEXT[event.data?.reason?.kind] ?? '结束'
+      const reason = event.data?.reason?.kind
+      return reason === undefined || reason === null ? fallback : statusLabel(reason, lang)
     }
-    return '结束'
+    return fallback
   }
 
   /**
@@ -397,6 +663,9 @@ export function apply(ctx) {
    * every event here is a fresh ask; dedup keys are the durable ids.
    */
   ctx.on('session/event', (session, event) => {
+    // Read the language once per event: every field built below belongs to
+    // this one notification, and a switch mid-render must not split it.
+    const language = syncLang(ctx)
     if (event.type === 'approval/asked') {
       if (!settings.get().approval) return
       if (effectiveApprovalPolicy(session) !== 'ask') return
@@ -406,10 +675,12 @@ export function apply(ctx) {
       const reason = event.data.reason
       notify('ap:' + String(event.data.id), {
         kind: 'approval',
-        title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
-        status: '需要审批',
-        detail: '工具：' + toolName + (typeof reason === 'string' && reason !== '' ? '，原因：' + reason : ''),
-      })
+        title: titleOf(root) ?? titleOf(session) ?? t(language, 'host.sessionFallback'),
+        status: t(language, 'host.status.needsApproval'),
+        detail: typeof reason === 'string' && reason !== ''
+          ? t(language, 'host.detail.toolReason', { tool: toolName, reason })
+          : t(language, 'host.detail.tool', { tool: toolName }),
+      }, language)
       return
     }
     if (event.type === 'tool/call' && event.data.name === 'ask_user_question') {
@@ -432,10 +703,10 @@ export function apply(ctx) {
       if (text.length > 100) text = text.slice(0, 100) + '…'
       notify('qu:' + String(event.data.callId), {
         kind: 'question',
-        title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
-        status: '等待回答',
-        detail: text === '' ? '（请查看界面）' : text,
-      })
+        title: titleOf(root) ?? titleOf(session) ?? t(language, 'host.sessionFallback'),
+        status: t(language, 'host.status.awaitingAnswer'),
+        detail: text === '' ? t(language, 'host.detail.seeUi') : text,
+      }, language)
       return
     }
     // Plan review: the agent called exit_plan_mode and is blocked on the
@@ -463,11 +734,12 @@ export function apply(ctx) {
       if (root !== undefined) currentRoot = root
       notify('pr:' + String(event.data.callId), {
         kind: 'plan',
-        title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
-        status: '等待确认',
-        detail: '标题：' + (heading ?? '（无标题）')
-          + (excerptText === '' ? '' : '\n摘要：' + excerptText),
-      })
+        title: titleOf(root) ?? titleOf(session) ?? t(language, 'host.sessionFallback'),
+        status: t(language, 'host.status.awaitingConfirm'),
+        detail: t(language, 'host.detail.planTitle', {
+          heading: heading ?? t(language, 'host.detail.planUntitled'),
+        }) + (excerptText === '' ? '' : '\n' + t(language, 'host.detail.planExcerpt', { excerpt: excerptText })),
+      }, language)
       return
     }
     // Goal blocked: the autonomous goal run ended on a persistent blocker
@@ -480,22 +752,22 @@ export function apply(ctx) {
       const message = goal?.blockedReason?.message
       const reason = typeof message === 'string' && message !== ''
         ? (message.length > 120 ? message.slice(0, 120) + '…' : message)
-        : '（未提供原因）'
+        : t(language, 'host.detail.reasonUnknown')
       const root = rootOf(session) ?? currentRoot
       if (root !== undefined) currentRoot = root
       notify('goal:' + String(goal?.id ?? '') + ':' + String(goal?.revision ?? ''), {
         kind: 'goal',
-        title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
-        status: '需要处理',
-        detail: '原因：' + reason,
-      })
+        title: titleOf(root) ?? titleOf(session) ?? t(language, 'host.sessionFallback'),
+        status: t(language, 'host.status.needsAction'),
+        detail: t(language, 'host.detail.reason', { reason }),
+      }, language)
     }
   })
 
   // 3-second dedup window: a subagent's own `agent/status` idle lands right
   // after its `subagent/end`; only the first of the pair becomes a toast.
   const seen = new Map()
-  const notify = (key, msg) => {
+  const notify = (key, msg, language) => {
     const s = settings.get()
     if (s.enabled !== true) return
     const now = Date.now()
@@ -505,16 +777,17 @@ export function apply(ctx) {
     if (seen.size > 200) {
       for (const [k, t] of seen) if (now - t >= 3000) seen.delete(k)
     }
+    const use = language ?? lang
     const item = Object.assign({ at: now }, msg)
     runtime.queue.push(item)
     if (runtime.queue.length > 20) runtime.queue.shift()
-    const title = kindTitle(item.kind)
+    const title = kindTitle(item.kind, use)
     // Desktop channel: a real Windows toast with the system notification sound.
-    showWindowsToast(title, bodyLines(item)).then((outcome) => {
+    showWindowsToast(title, bodyLines(item, use)).then((outcome) => {
       if (outcome.ok !== true) console.error('[dsh-task-notify] windows toast failed:', outcome.error)
     }, () => {})
     if (s.push && s.token !== '') {
-      pushToPushPlus(s.token, title, pushBody(item)).catch((error) => {
+      pushToPushPlus(s.token, title, bodyLines(item, use).join('\n'), use).catch((error) => {
         console.error('[dsh-task-notify] push failed:', error)
       })
     }
@@ -522,27 +795,30 @@ export function apply(ctx) {
 
   ctx.on('subagent/end', (info) => {
     if (!settings.get().subagent) return
+    const language = syncLang(ctx)
     const id = info === null || info === undefined ? undefined : info.id
     const child = id === undefined ? undefined : sessions()?.get(id)
     const root = rootOf(child) ?? currentRoot
     if (root !== undefined) currentRoot = root
     notify(String(id ?? info?.runId ?? 'subagent'), {
       kind: 'subagent',
-      title: titleOf(root) ?? titleOf(child) ?? String(info?.provider ?? '子代理'),
+      title: titleOf(root) ?? titleOf(child) ?? String(info?.provider ?? t(language, 'host.subagentFallback')),
       // `SubagentStopReason` reuses the harness turn-end vocabulary, so it folds
       // through the same label table instead of leaking `error`/`aborted` into
       // the toast body.
-      status: statusLabel(info?.stopReason ?? '结束'),
-    })
+      status: statusLabel(info?.stopReason ?? 'ended', language),
+    }, language)
   })
 
   ctx.on('workflow/end', (info, result) => {
     if (!settings.get().workflow) return
+    const language = syncLang(ctx)
     notify('wf:' + String(info?.id ?? ''), {
       kind: 'workflow',
-      title: titleOf(currentRoot) ?? (typeof info?.meta?.name === 'string' ? info.meta.name : '工作流'),
-      status: statusLabel(result?.stopReason ?? '结束'),
-    })
+      title: titleOf(currentRoot)
+        ?? (typeof info?.meta?.name === 'string' ? info.meta.name : t(language, 'host.workflowFallback')),
+      status: statusLabel(result?.stopReason ?? 'ended', language),
+    }, language)
   })
 
   ctx.on('agent/status', (payload) => {
@@ -555,15 +831,16 @@ export function apply(ctx) {
     // so a non-root agent must not raise a second, mislabelled one — without
     // this guard the 主回合 switch alone would notify for every subagent.
     if (!isLiveRootSession(agent.session)) return
+    const language = syncLang(ctx)
     const root = rootOf(agent.session)
     if (root !== undefined) currentRoot = root
     notify(String(agent.id), {
       kind: 'agent',
-      title: titleOf(root) ?? titleOf(agent.session) ?? 'Agent 回合',
+      title: titleOf(root) ?? titleOf(agent.session) ?? t(language, 'host.sessionFallback'),
       // Enrich the generic 结束 with the last turn/end reason (完成/中止/
       // 失败/超出上限/中断/阻塞), so abnormal stops stand out.
       status: turnEndLabel(agent.session),
-    })
+    }, language)
   })
 
   // Strict endpoint registration: the gateway resolves taskNotify/* from

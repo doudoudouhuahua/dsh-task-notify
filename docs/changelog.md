@@ -2,6 +2,65 @@
 
 [← 返回 README](../README.md)
 
+## 1.8.0 — 英文适配（滑块切换）+ BurntToast 自动安装
+
+**新增：中英双语，面板头部滑块热切换（默认中文）**
+
+- 新增 `src/i18n.js`：宿主 / 客户端共享的双语词典与查表（`host.*` 通知文案、`ui.*` 面板文案），
+  两份词典 key 集合一致、查表是总函数（未命中的键回显键名，永不为一条通知抛错）；
+- **语言归属**：复用 **DSH 自己的语言偏好**（`locale` 设置命名空间的 `preference`），面板滑块调用的
+  就是 `locale.setLocale(...)`——滑块与「设置 → 通用 → 语言」是同一个开关，偏好由 DSH 持久化，
+  跨刷新 / 重启 / 浏览器共享；
+- **默认中文**：从未选择过语言时取浏览器语言，中文浏览器落中文、其余落英文；两种语言之外的目录语言
+  （将来新增的语言包）统一回退英文；
+- **宿主侧**（toast 与 PushPlus 正文都由宿主渲染）：`ctx.get('locale')` 尽力读取当前语言，读不到即
+  中文；状态文案先把 harness 枚举（`completed`/`error`/`cancelled`…）与关注类通道写入的历史中文标签
+  （`需要审批`/`等待回答`…）折叠成同一个键，再按语言取词——**wire 上的 `status` 字符串与队列语义不变**；
+- **客户端侧**：词典注册进共享 locale 服务（命名空间 `taskNotify`，重复注册按 re-entry 处理），
+  面板文案走 `locale.bind(...)`（每次调用现查，切换后下一次渲染即新语言），并订阅
+  `locale.subscribe` + `locale/change` 触发重渲染；
+- **滑块**：面板头部「中文 / English」两态开关，`role="switch"` + `aria-checked`，键盘可用，
+  位置即当前语言；**组合中没有 locale 插件时不渲染滑块**（不提供无法生效的假开关），文案固定中文；
+- **测试通道不滞后**：`testNotify` 新增可选语言入参（面板点击时带上当前语言），刚切完语言点测试就是
+  新语言的 toast。
+
+**新增：自动安装 BurntToast 依赖**
+
+- 插件激活后台探测一次 `pwsh` 能否导入 BurntToast，缺失时**自动安装**（`-Scope CurrentUser`，
+  免管理员）：先装最新版，失败再钉 `-RequiredVersion 1.1.0`；装完在同一次 pwsh 调用内重新导入校验；
+- **每进程最多探测 / 安装一次**：失败被记住，不会每条通知都联网重试；已有模块的机器上零输出、零延迟；
+- toast 脚本改为退出码协议：模块导入失败 `exit 3`、创建 toast 失败 `exit 4`。收到 `exit 3` 时安装并
+  **重试一次**，收到 `exit 4` 直接返回（模块已在，重试没有意义）；
+- `pwsh.exe` 不在 PATH 时不尝试安装，直接报「未找到 PowerShell 7」；所有失败按当前语言写入宿主日志
+  与「测试 Windows 通知」的提示。
+
+**修复：通知图标被静默换成 BurntToast 自带图片**
+
+- 现象：通知能正常弹出，但圆形角标不是 DeepSeek 图标，而是 BurntToast 自带的「吐司照片」，
+  且插件与面板都报告成功；
+- 根因是 `TOAST_VARIANTS` 的**顺序**：`showWindowsToast` 以「首个 exit 0」为准返回，而排在首位的
+  `plain` 变体不带 `-AppLogo`、没有任何可失败之处，于是它每次都成功，logo 永远不会被传下去。
+  BurntToast 的 `New-BTImage` 声明了 `[string] $Source = $Script:DefaultImage`，
+  `New-BurntToastNotification` 在 `-AppLogo` 为空时正是**不带 `-Source`** 调用它，模块自带图片
+  因此被静默写进通知，而命令仍以 exit 0 结束；
+- 修复：把带 `-AppLogo` 的变体排到最前（`icon` → `plain` → `icon-pinned` → `plain-pinned`）。
+  `resolveToastIcon()` 返回 null 时本来就对所有变体禁用 `-AppLogo`，所以无图标变体仍保留为
+  「模块不接受该参数」时的重试路径；
+- **这类问题此前的 31 项契约检查全部通过**——它只断言 toast 送达（exit 0），而图标被替换时命令
+  同样 exit 0。因此新增 `tools/check-toast-icon.mjs`：读 Windows 通知数据库，比对系统**实际记录的
+  `<image src>`**，并做了负向对照（把顺序改回 `plain` 优先即 FAIL）；
+- 同时修好排查工具本身的一个盲点：通知库是 WAL 模式，最新通知先落在 `wpndatabase.db-wal`，
+  只拷主库会读到过期历史（表现为刚发的通知查不到）。
+
+**顺带**
+
+- README 顶部加入真实系统通知截图 `notify-demonstrate.png`（并纳入 `files` 白名单），新增英文入口
+  `README.en.md`，README 顶部提供中英互链；
+- `tools/verify-contract.mjs`：26 → 31 项检查，新增语言五项与 `testNotify` 参数契约
+  （默认中文 / 英文切换 / 关注类文案 / 未知语言回退 / 语言入参），负向对照数量不变。
+
+**升级须知**：`lib/` 是随仓库提交的构建产物，升级后同步方式不变（见[构建与开发](development.md)）。
+
 ## 1.7.0 — 修复 DSH 0.1.6-alpha.1 下整插件失效
 
 **根因**：DSH 于 2026-09-15 合入上游提交 `perf(typert): materialize generated schemas on first use`

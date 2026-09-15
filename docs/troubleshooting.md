@@ -146,6 +146,9 @@ const strictCodec = (typeSymbol, schema) => {
 | 客户端 | 客户端入口 | 必须能解析 `exports["./client"]`；`dsh.client.platform` 决定是否进入 boot graph | 浏览器控制台报错 + `client-modules: ...` 前缀的异常 |
 | 客户端 | Slot 名与注册契约 | Slot 改名 / 变 kind（`single` ↔ `list`）会让 UI 不出现且不一定报错 | 在 DSH 工作树里搜 Slot 名：`rg "<slot 名>" packages/client`（无 ripgrep 时用 `git grep`） |
 | 客户端 | `$mount` 的 strict 描述符 | 客户端 Gateway 会 `requireStrictDescriptor`，非 strict 直接拒绝 | 与宿主共用同一份描述符即可避免两边不一致 |
+| 宿主（非平台） | toast 变体顺序 | 通知**能弹出**但角标变成 BurntToast 自带的吐司照片，命令仍 exit 0、面板提示成功。`showWindowsToast` 以首个 exit 0 返回，排在首位的 `plain` 变体不带 `-AppLogo`、无可失败之处，必然抢先成功 | `node tools/check-toast-icon.mjs`（读通知库比对实际记录的 `<image src>`；顺序改回 `plain` 优先即 FAIL） |
+| 宿主（非平台） | `-AppLogo` 的取值形态 | 8.3 短名（`~1`）或带查询串（`?`）会被 Windows 拒绝，BurntToast 只打一条 warning 就回退到自带图片 | 同上（脚本会预检路径形态），或 `pwsh -c "Test-Path '<路径>'"` |
+| 排查工具本身 | 通知库是 WAL 模式 | 「刚发的通知查不到、最新记录停在几分钟前」：最新通知先落在 `wpndatabase.db-wal`，只拷主库读到的是过期历史 | 拷贝时带上 `-wal` / `-shm`（`tools/dump-toast-db.py` 与 `check-toast-icon.mjs` 已处理） |
 
 ## 五、排查清单
 

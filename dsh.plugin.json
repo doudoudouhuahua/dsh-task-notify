@@ -1,12 +1,15 @@
 {
   "name": "dsh-task-notify",
   "description": "Agent/subagent/workflow completion, approval-required, plan-review, goal-blocked, and user-question toasts with optional PushPlus push notifications",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "entry": {
     "name": "dsh-task-notify",
     "inject": []
   },
   "client": {
-    "platform": "web"
+    "platform": "web",
+    "inject": [
+      "@deepseek-ai/dsh-client-locale"
+    ]
   }
 }

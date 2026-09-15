@@ -1,6 +1,6 @@
 {
   "name": "dsh-task-notify",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "DSH web plugin: agent/subagent/workflow completion, approval-required, plan-review, goal-blocked, and user-question toasts with optional PushPlus push notifications",
   "license": "MIT",
   "type": "module",
@@ -20,7 +20,9 @@
     },
     "client": {
       "platform": "web",
-      "inject": []
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "files": [
@@ -28,14 +30,17 @@
     "cordis.patch.yml",
     "dsh.plugin.json",
     "deepseek.png",
+    "notify-demonstrate.png",
     "README.md",
+    "README.en.md",
     "docs",
     "tools",
     "LICENSE"
   ],
   "scripts": {
     "build": "node build.mjs",
-    "verify": "node tools/verify-contract.mjs"
+    "verify": "node tools/verify-contract.mjs",
+    "verify:icon": "node tools/check-toast-icon.mjs"
   },
   "dependencies": {},
   "devDependencies": {},

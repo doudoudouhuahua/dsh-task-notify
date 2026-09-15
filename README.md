@@ -1,12 +1,18 @@
 # dsh-task-notify
 
+[中文](README.md) | [English](README.en.md)
+
 **Agent 停下来的那一刻，让 Windows 通知你。**
 
 DSH（DeepSeek Harness）Web 插件：主回合 / 子代理 / 工作流任务完成时，以及 **agent 停下来等你操作时**
 （需要审批、向你提问、计划待确认、目标受阻），弹出真正的 **Windows 系统通知**（带系统提示音与
 DeepSeek 图标），可选 PushPlus 微信推送——浏览器关闭也能收到。
 
-![version](https://img.shields.io/badge/version-1.7.0-2f81f7?style=flat-square)
+![任务完成系统通知：标题「Agent任务完成」，正文为会话名、时间与状态](notify-demonstrate.png)
+
+*桌面通道实拍：标题 + 会话名 / 时间 / 状态，带 DeepSeek 图标与系统提示音。*
+
+![version](https://img.shields.io/badge/version-1.8.0-2f81f7?style=flat-square)
 ![license](https://img.shields.io/badge/license-MIT-3fb950?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?style=flat-square)
 ![DSH](https://img.shields.io/badge/DSH%20Web-%E2%89%A5%200.1.6--alpha.1-8957e5?style=flat-square)
@@ -16,6 +22,8 @@ DeepSeek 图标），可选 PushPlus 微信推送——浏览器关闭也能收�
 | 能力 | 说明 |
 | --- | --- |
 | 🔔 **系统级通知** | 经 BurntToast（PowerShell 模块）调用 Windows 通知中心，播放系统提示音，无需网页授权 |
+| 📦 **依赖免装** | BurntToast 缺失时插件**自动安装**（当前用户范围，免管理员）；已装机器上零打扰 |
+| 🌐 **中英双语** | 面板头部滑块热切换，通知与面板文案即时切换；语言跟随 DSH 的「设置 → 通用 → 语言」，默认中文 |
 | 🖼️ **图标热更新** | 图标取自包内 `deepseek.png`（按内容指纹缓存），替换后**下一条通知立即换新**，无需重建或重启 |
 | 📱 **手机推送** | 可选 PushPlus 推送，电脑不在身边也能收到 |
 | ⏸️ **等你操作就提醒** | 审批请求、agent 提问、计划待确认、目标受阻——agent 停下的每一类场景都有独立通知 |
@@ -37,7 +45,8 @@ DeepSeek 图标），可选 PushPlus 微信推送——浏览器关闭也能收�
 
 ## 快速开始
 
-1. **装依赖**——Windows 10 / 11，通知由 BurntToast 经 PowerShell 7 发出：
+1. **装依赖**——Windows 10 / 11。BurntToast 已由插件**自动安装**（当前用户范围，免管理员）；
+   如需手工安装：
 
    ```powershell
    Install-Module BurntToast -Scope CurrentUser
@@ -51,6 +60,9 @@ DeepSeek 图标），可选 PushPlus 微信推送——浏览器关闭也能收�
 
 3. **验证**——重启 DSH，点击会话标题栏铃铛 →「通知类型」层 →「测试 Windows 通知」，
    应听到系统提示音并弹出带 DeepSeek 图标的 toast。
+
+4. **切语言**（可选）——面板头部滑块在「中文 / English」之间热切换，通知与面板文案即时生效；
+   它写的就是 DSH 自己的语言偏好，与「设置 → 通用 → 语言」同步。
 
 手机推送（可选）：在 https://www.pushplus.plus 扫码取「一对一推送」token → 展开「手机推送」层粘贴并
 保存 → 点「测试手机推送」。
@@ -70,7 +82,7 @@ DeepSeek 图标），可选 PushPlus 微信推送——浏览器关闭也能收�
 | [测试与验收](docs/testing.md) | 逐条验收表、契约校验脚本与实测记录 |
 | [DSH 升级后插件失效的排查手册](docs/troubleshooting.md) | 失效形态判定、证据来源、案例复盘、高频破坏点与排查清单 |
 | [构建与开发](docs/development.md) | 目录结构、构建与同步流程、实现要点与已知限制 |
-| [版本历史](docs/changelog.md) | 1.1.0 → 1.7.0 全部变更 |
+| [版本历史](docs/changelog.md) | 1.1.0 → 1.8.0 全部变更 |
 
 ## 许可
 

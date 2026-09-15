@@ -8,16 +8,38 @@
  * - the HOST fires every Windows toast / PushPlus push itself (the client
  *   only polls settings every 10s to keep the bell and panel in sync),
  * - the panel keeps clear of the dsh-better-sidebar right/bottom panels by
- *   measuring their live DOM every animation frame (60fps drag following).
+ *   measuring their live DOM every animation frame (60fps drag following),
+ * - copy follows the shared DSH locale preference, and the panel header
+ *   carries a two-position switch that writes it (`locale.setLocale`), so the
+ *   slider and 「设置 → 通用 → 语言」 are the same setting.
  *
  * The Host owns every durable fact; this half only renders what the Remote
  * returns and forwards user edits back through it.
  */
 import React from 'react'
 import { INVOCATIONS } from '../contract.js'
+import { DEFAULT_LANG, MESSAGES, normalizeLang, t as translate } from '../i18n.js'
+import { DICTS, NS } from './locales.js'
 
 export const name = 'dsh-task-notify'
 export const inject = ['remote', 'slots']
+
+/**
+ * Every message key this bundle knows. A translate result that is a member of
+ * this set is the locale service echoing an unregistered key (or a missing
+ * dictionary entry) rather than copy, which {@link t} then replaces with the
+ * bundle's own table.
+ */
+const MESSAGE_KEYS = new Set(Object.keys(MESSAGES.zh))
+
+/**
+ * Build identity of this browser bundle. A stale bundle looks EXACTLY like a
+ * working one until a feature is missing, so the running copy is made
+ * self-describing: `window.__DSH_TASK_NOTIFY__` answers "which build is this
+ * page actually executing?" without a source map. Bump it with the package
+ * version so a support question has a one-word answer.
+ */
+const BUILD = '1.8.0'
 
 const STYLE_ID = 'dsh-task-notify-style'
 
@@ -73,6 +95,7 @@ const cssText = `
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 6px 14px;
 }
 .dtn_panelTitle {
@@ -200,6 +223,59 @@ const cssText = `
   pointer-events: none;
 }
 .dtn_switch input:checked + .dtn_track .dtn_thumb { transform: translateX(14px); }
+
+/* Two-position language slider: a compact switch that reads 中文 off and
+   English on, so the active language is legible from the control itself
+   rather than from a separate value label. */
+.dtn_lang {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  width: 96px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 11px;
+  background: none;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dtn_lang:hover { border-color: var(--dsw-alias-label-tertiary); }
+.dtn_lang:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.dtn_langTrack {
+  position: absolute;
+  inset: 2px;
+  display: flex;
+  align-items: center;
+  border-radius: 9px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  pointer-events: none;
+}
+.dtn_langLabel {
+  flex: 1;
+  z-index: 1;
+  text-align: center;
+  transition: color 0.15s ease;
+}
+.dtn_lang[data-lang='zh'] .dtn_langLabel[data-code='zh'],
+.dtn_lang[data-lang='en'] .dtn_langLabel[data-code='en'] {
+  color: var(--dsw-alias-label-primary-inverted);
+}
+.dtn_langThumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: calc(50% - 1px);
+  height: calc(100% - 2px);
+  border-radius: 8px;
+  background: var(--dsw-alias-brand-primary);
+  transition: transform 0.15s ease;
+}
+.dtn_lang[data-lang='en'] .dtn_langThumb { transform: translateX(100%); }
 
 .dtn_input {
   box-sizing: border-box;
@@ -329,6 +405,101 @@ function GroupChevron() {
 
 export function apply(ctx) {
   ctx.effect(() => adoptStyles(), 'dsh-task-notify: styles')
+  // Publish the running build for support and self-checking; removed on unload.
+  try {
+    window.__DSH_TASK_NOTIFY__ = { build: BUILD, hasLanguageSlider: true }
+    ctx.effect(() => () => { try { delete window.__DSH_TASK_NOTIFY__ } catch { /* 忽略 */ } },
+      'dsh-task-notify: build marker')
+  } catch { /* 非浏览器环境忽略 */ }
+
+  /**
+   * The shared locale service, resolved ON DEMAND.
+   *
+   * Deliberately not `const locale = ctx.get('locale')`: a client plugin's
+   * `apply()` runs as soon as its bundle is applied, and the locale plugin's
+   * service may be provided only afterwards. Reading once at apply time
+   * therefore froze `undefined` into this closure for the whole page lifetime
+   * and silently disabled every locale feature (the shipped symptom was the
+   * missing language slider). `inject: ['locale']` is NOT the fix either: that
+   * would make a composition without the locale plugin leave this row WAITING,
+   * taking the bell and the panel down with it. Resolving per use degrades
+   * instead: the panel keeps working in Chinese and the slider appears as soon
+   * as the service exists.
+   * @returns the locale service, or undefined when this composition has none.
+   */
+  const localeService = () => {
+    try {
+      return ctx.get('locale')
+    } catch {
+      // A context that refuses the lookup behaves like an absent service.
+      return undefined
+    }
+  }
+
+  /**
+   * Panel copy in the active language. `locale.bind(ns)` resolves through the
+   * service on EVERY call (fallback chain included), so a language switch
+   * reaches already-rendered text as soon as the next render happens.
+   *
+   * The result is checked before it is trusted: the service answers an unknown
+   * key with the key itself, which is exactly what a namespace that has not
+   * been registered yet does. Shipping raw keys into the panel (observed once
+   * on the first open after a reload) is worse than shipping the wrong
+   * language, so a result that still looks like a key falls back to this
+   * bundle's own Chinese table. Every key is namespaced (`ui.*` / `host.*`),
+   * so real copy can never be mistaken for one.
+   * @param key - message key from the shared table.
+   * @param params - optional `{name}` placeholder values.
+   * @returns the localized text.
+   */
+  const t = (key, params) => {
+    try {
+      const locale = localeService()
+      if (locale !== undefined && locale !== null) {
+        const text = locale.bind(NS)(key, params)
+        if (typeof text === 'string' && text !== '' && !MESSAGE_KEYS.has(text)) return text
+      }
+    } catch (error) {
+      // A foreign or half-mounted service must not blank the whole panel.
+      console.error('[dsh-task-notify] locale lookup failed:', error)
+    }
+    return translate(DEFAULT_LANG, key, params)
+  }
+
+  /**
+   * The service instance while it is mounted, captured by {@link language} so
+   * that a component rendered before the service existed still repaints with
+   * it once it arrives.
+   */
+  let localeRef = null
+
+  /** The active language, or the plugin default when the service is absent. */
+  const activeLang = () => {
+    try {
+      const locale = localeService()
+      if (locale === undefined || locale === null || typeof locale.getLocale !== 'function') {
+        return DEFAULT_LANG
+      }
+      localeRef = locale
+      const snapshot = locale.getLocale()
+      const active = snapshot === null || snapshot === undefined ? undefined : snapshot.active
+      return typeof active === 'string' && active !== '' ? normalizeLang(active) : DEFAULT_LANG
+    } catch {
+      return DEFAULT_LANG
+    }
+  }
+
+  /** Point the shared preference at one of the two languages this plugin carries. */
+  const setLang = (next) => {
+    const locale = localeService() ?? localeRef
+    if (locale === undefined || locale === null) return
+    try {
+      locale.setLocale(next)
+    } catch (error) {
+      // Both ids are built-in, so this only trips on an unmounted service.
+      console.error('[dsh-task-notify] locale switch failed:', error)
+    }
+  }
 
   let taskNotify
   ctx.effect(async () => {
@@ -368,6 +539,49 @@ export function apply(ctx) {
     }, [])
     return v
   }
+
+  // Panel copy joins the shared language catalog. The service rejects a
+  // REPEAT registration for the same language ("already has locale"), so the
+  // re-entry path is handled explicitly instead of assumed: a reload that
+  // loses a dictionary must never take the bell and panel down with it.
+  // Registered once the service is reachable — `apply()` may well run first.
+  let dictsRegistered = false
+  const registerDicts = () => {
+    if (dictsRegistered) return
+    const locale = localeService()
+    if (locale === undefined || locale === null) return
+    try {
+      locale.register(NS, DICTS)
+      dictsRegistered = true
+    } catch (error) {
+      // Another instance already owns these dictionaries; keep the panel.
+      console.error('[dsh-task-notify] dictionary registration skipped:', error)
+      dictsRegistered = true
+    }
+  }
+  registerDicts()
+  ctx.effect(() => {
+    registerDicts()
+    return () => {}
+  }, 'dsh-task-notify: dictionaries')
+  // The switch repaints the panel, the bell tooltip and its slider thumb.
+  ctx.effect(() => {
+    const on = () => {
+      registerDicts()
+      emit()
+    }
+    const locale = localeService()
+    const off = locale !== undefined && locale !== null && typeof locale.subscribe === 'function'
+      ? locale.subscribe(on)
+      : null
+    ctx.on('locale/change', on)
+    return () => {
+      if (off !== null && off !== undefined) {
+        try { off() } catch { /* 忽略 */ }
+      }
+      ctx.off('locale/change', on)
+    }
+  }, 'dsh-task-notify: locale refresh')
 
   // Best-effort layout adaptation: measure the better-sidebar panels' live
   // DOM every animation frame, so the config panel follows even mid-drag
@@ -490,7 +704,7 @@ export function apply(ctx) {
     const err = result === null || result === undefined ? undefined : result.error
     if (typeof err?.message === 'string' && err.message !== '') return err.message
     if (typeof err?.code === 'string' && err.code !== '') return err.code
-    return '未知错误'
+    return t('ui.note.unknownError')
   }
 
   async function loadSettings() {
@@ -504,7 +718,7 @@ export function apply(ctx) {
   }
 
   const saveSettings = async (update) => {
-    if (taskNotify === undefined) return { ok: false, error: '服务未就绪' }
+    if (taskNotify === undefined) return { ok: false, error: t('ui.note.serviceNotReady') }
     try {
       const result = await taskNotify.updateSettings(update)
       if (result !== null && result !== undefined && result.ok === true) {
@@ -512,7 +726,8 @@ export function apply(ctx) {
         return { ok: true, value: result.value }
       }
       const err = result === null || result === undefined ? undefined : result.error
-      const message = typeof err?.message === 'string' ? err.message : typeof err?.code === 'string' ? err.code : '未知错误'
+      const message = typeof err?.message === 'string' ? err.message
+        : typeof err?.code === 'string' ? err.code : t('ui.note.unknownError')
       console.error('[dsh-task-notify] settings update failed:', err)
       return { ok: false, error: String(message) }
     } catch (error) {
@@ -530,7 +745,9 @@ export function apply(ctx) {
   const instantSave = (key, next) => {
     const run = async () => {
       const current = settingsReady ? lastSettings : null
-      if (current === null || current === undefined) return { ok: false, error: '设置尚未加载' }
+      if (current === null || current === undefined) {
+        return { ok: false, error: t('ui.note.settingsNotLoaded') }
+      }
       return await saveSettings(Object.assign({}, current, { [key]: next }))
     }
     saveChain = saveChain.then(run, run)
@@ -538,7 +755,7 @@ export function apply(ctx) {
   }
 
   const testPush = async () => {
-    if (taskNotify === undefined) return { ok: false, error: '服务未就绪' }
+    if (taskNotify === undefined) return { ok: false, error: t('ui.note.serviceNotReady') }
     try {
       const result = await taskNotify.testPush()
       if (result !== null && result !== undefined && result.ok === true) {
@@ -591,7 +808,7 @@ export function apply(ctx) {
     const pushOn = settingsReady && enabled && settings?.push === true
     return React.createElement('button', {
       className: 'dtn_bell',
-      title: settingsReady ? '任务完成提醒' : '任务完成提醒（同步中）',
+      title: settingsReady ? t('ui.bell.title') : t('ui.bell.pending'),
       'data-on': enabled ? 'true' : 'false',
       'data-ready': settingsReady ? 'true' : 'false',
       'data-open': panelOpen ? 'true' : 'false',
@@ -608,6 +825,44 @@ export function apply(ctx) {
       React.createElement('input', { type: 'checkbox', checked: checked === true, onChange }),
       React.createElement('span', { className: 'dtn_track' },
         React.createElement('span', { className: 'dtn_thumb' })))
+  }
+
+  /**
+   * The language slider: a two-position switch whose own labels name the
+   * languages, so the active one is readable from the control itself (the
+   * thumb sits on 中文 or English). It writes the SHARED preference, which is
+   * why flipping it also switches the DSH UI — the panel slider and
+   * 「设置 → 通用 → 语言」 are one setting.
+   *
+   * Renders nothing when no locale service is mounted: a switch that cannot
+   * change anything is worse than no switch.
+   */
+  function LangSwitch() {
+    useSnapshot()
+    // Resolved per render, never captured: the locale service may appear after
+    // this plugin applied, and the slider must show up the moment it does.
+    if (localeService() === undefined && localeRef === null) return null
+    const lang = activeLang()
+    const next = lang === 'zh' ? 'en' : 'zh'
+    const label = (code, text) => React.createElement('span', {
+      className: 'dtn_langLabel',
+      key: code,
+      'data-code': code,
+    }, text)
+    return React.createElement('button', {
+      className: 'dtn_lang',
+      type: 'button',
+      role: 'switch',
+      'data-lang': lang,
+      'aria-checked': lang === 'en' ? 'true' : 'false',
+      'aria-label': t('ui.language'),
+      title: t('ui.language'),
+      onClick: () => setLang(next),
+    },
+    React.createElement('span', { className: 'dtn_langTrack' },
+      React.createElement('span', { className: 'dtn_langThumb' }),
+      label('zh', '中文'),
+      label('en', 'English')))
   }
 
   function Panel() {
@@ -653,7 +908,7 @@ export function apply(ctx) {
       const next = event.target.checked === true
       void instantSave(key, next).then((outcome) => {
         if (outcome.ok !== true) {
-          setNote({ ok: false, text: '保存失败：' + String(outcome.error ?? '') })
+          setNote({ ok: false, text: t('ui.note.saveFailed', { error: String(outcome.error ?? '') }) })
         }
       })
     }
@@ -689,7 +944,9 @@ export function apply(ctx) {
       const outcome = await saveSettings(Object.assign({}, settings, { token: tokenText }))
       setNote({
         ok: outcome.ok === true,
-        text: outcome.ok === true ? 'Token 已保存' : '保存失败：' + String(outcome.error ?? ''),
+        text: outcome.ok === true
+          ? t('ui.note.tokenSaved')
+          : t('ui.note.saveFailed', { error: String(outcome.error ?? '') }),
       })
       if (outcome.ok === true) setTokenDraft(null)
     }
@@ -699,33 +956,42 @@ export function apply(ctx) {
       if (tokenDraft !== null) {
         const outcome = await saveSettings(Object.assign({}, settings, { token: tokenDraft }))
         if (outcome.ok !== true) {
-          setNote({ ok: false, text: 'Token 保存失败：' + String(outcome.error ?? '') })
+          setNote({ ok: false, text: t('ui.note.tokenSaveFailed', { error: String(outcome.error ?? '') }) })
           return
         }
         setTokenDraft(null)
       }
       const result = await testPush()
-      setNote({ ok: result.ok === true, text: result.ok === true ? '测试消息已发送，请查收' : '失败：' + String(result.error ?? '') })
+      setNote({
+        ok: result.ok === true,
+        text: result.ok === true
+          ? t('ui.note.pushSent')
+          : t('ui.note.testFailed', { error: String(result.error ?? '') }),
+      })
     }
     const testNotify = async () => {
       if (taskNotify === undefined) {
-        setNote({ ok: false, text: '服务未就绪' })
+        setNote({ ok: false, text: t('ui.note.serviceNotReady') })
         return
       }
       try {
-        const result = await taskNotify.testNotify()
+        // The panel's CURRENT language rides along, so the test toast matches
+        // the slider immediately instead of the host's last synced value.
+        const result = await taskNotify.testNotify(activeLang())
         if (result !== null && result !== undefined && result.ok === true) {
           const value = unwrap(result) ?? { ok: true }
           setNote({
             ok: value.ok === true,
-            text: value.ok === true ? '已弹出 Windows 系统通知（含提示音）' : '失败：' + String(value.error ?? ''),
+            text: value.ok === true
+              ? t('ui.note.toastShown')
+              : t('ui.note.testFailed', { error: String(value.error ?? '') }),
           })
           return
         }
-        setNote({ ok: false, text: '失败：' + remoteError(result) })
+        setNote({ ok: false, text: t('ui.note.testFailed', { error: remoteError(result) }) })
       } catch (error) {
         console.error('[dsh-task-notify] test notify failed:', error)
-        setNote({ ok: false, text: '失败：' + String(error?.message ?? error ?? '') })
+        setNote({ ok: false, text: t('ui.note.testFailed', { error: String(error?.message ?? error ?? '') }) })
       }
     }
     return React.createElement('div', {
@@ -738,29 +1004,30 @@ export function apply(ctx) {
       },
     },
     React.createElement('div', { className: 'dtn_panelHead' },
-      React.createElement('h4', { className: 'dtn_panelTitle' }, '任务完成提醒'),
-      React.createElement('button', { className: 'dtn_close', title: '关闭', onClick: () => setPanelOpen(false) }, '×')),
+      React.createElement('h4', { className: 'dtn_panelTitle' }, t('ui.panel.title')),
+      React.createElement(LangSwitch),
+      React.createElement('button', { className: 'dtn_close', title: t('ui.close'), onClick: () => setPanelOpen(false) }, '×')),
     section('master', false, [
       React.createElement('div', { className: 'dtn_row' },
-        React.createElement('span', { className: 'dtn_rowLabel' }, '总开关'),
+        React.createElement('span', { className: 'dtn_rowLabel' }, t('ui.master')),
         React.createElement(Switch, { checked: masterOn, onChange: toggle('enabled') })),
     ]),
-    group('kinds', true, '通知类型', [
-      row('agent', '主回合'),
-      row('subagent', '子代理'),
-      row('workflow', '工作流'),
-      row('approval', '需要审批'),
-      row('question', '询问用户'),
-      row('plan', '计划确认'),
-      row('goal', '目标受阻'),
-      React.createElement('button', { className: 'dtn_ghost dtn_testBtn', onClick: testNotify }, '测试 Windows 通知'),
+    group('kinds', true, t('ui.group.kinds'), [
+      row('agent', t('ui.kind.agent')),
+      row('subagent', t('ui.kind.subagent')),
+      row('workflow', t('ui.kind.workflow')),
+      row('approval', t('ui.kind.approval')),
+      row('question', t('ui.kind.question')),
+      row('plan', t('ui.kind.plan')),
+      row('goal', t('ui.kind.goal')),
+      React.createElement('button', { className: 'dtn_ghost dtn_testBtn', onClick: testNotify }, t('ui.test.notify')),
     ]),
-    group('push', true, '手机推送', [
+    group('push', true, t('ui.group.push'), [
       React.createElement('div', { className: 'dtn_row' },
-        React.createElement('span', { className: 'dtn_rowLabel' }, 'PushPlus 推送'),
+        React.createElement('span', { className: 'dtn_rowLabel' }, t('ui.push.enable')),
         React.createElement(Switch, { checked: settings.push === true, onChange: toggle('push') })),
       React.createElement('input', {
-        className: 'dtn_input', type: 'password', placeholder: 'PushPlus Token',
+        className: 'dtn_input', type: 'password', placeholder: t('ui.push.token'),
         value: tokenText, onChange: setToken,
         onKeyDown: (event) => {
           if (event.key === 'Enter') {
@@ -769,8 +1036,8 @@ export function apply(ctx) {
           }
         },
       }),
-      React.createElement('button', { className: 'dtn_primary dtn_testBtn', onClick: () => { void saveToken() } }, '保存 Token'),
-      React.createElement('button', { className: 'dtn_ghost dtn_testBtn', onClick: () => { void test() } }, '测试手机推送'),
+      React.createElement('button', { className: 'dtn_primary dtn_testBtn', onClick: () => { void saveToken() } }, t('ui.push.save')),
+      React.createElement('button', { className: 'dtn_ghost dtn_testBtn', onClick: () => { void test() } }, t('ui.test.push')),
     ]),
     // Results and errors (switch saves, token save, test outcomes) land here,
     // never dimmed, empty when nothing happened.
@@ -782,7 +1049,7 @@ export function apply(ctx) {
     name: 'conversation.session.header.actions',
     id: 'task-notify',
     order: 30,
-    label: '任务提醒',
+    label: t('ui.bell.title'),
   }, HeaderButton))
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
