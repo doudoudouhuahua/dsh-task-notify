@@ -529,7 +529,10 @@ export function apply(ctx) {
     notify(String(id ?? info?.runId ?? 'subagent'), {
       kind: 'subagent',
       title: titleOf(root) ?? titleOf(child) ?? String(info?.provider ?? '子代理'),
-      status: String(info?.stopReason ?? '结束'),
+      // `SubagentStopReason` reuses the harness turn-end vocabulary, so it folds
+      // through the same label table instead of leaking `error`/`aborted` into
+      // the toast body.
+      status: statusLabel(info?.stopReason ?? '结束'),
     })
   })
 
@@ -538,7 +541,7 @@ export function apply(ctx) {
     notify('wf:' + String(info?.id ?? ''), {
       kind: 'workflow',
       title: titleOf(currentRoot) ?? (typeof info?.meta?.name === 'string' ? info.meta.name : '工作流'),
-      status: String(result?.stopReason ?? '结束'),
+      status: statusLabel(result?.stopReason ?? '结束'),
     })
   })
 

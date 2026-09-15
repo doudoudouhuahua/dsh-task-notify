@@ -1,6 +1,6 @@
 {
   "name": "dsh-task-notify",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "DSH web plugin: agent/subagent/workflow completion, approval-required, plan-review, goal-blocked, and user-question toasts with optional PushPlus push notifications",
   "license": "MIT",
   "type": "module",
@@ -29,10 +29,13 @@
     "dsh.plugin.json",
     "deepseek.png",
     "README.md",
+    "docs",
+    "tools",
     "LICENSE"
   ],
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "verify": "node tools/verify-contract.mjs"
   },
   "dependencies": {},
   "devDependencies": {},

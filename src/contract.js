@@ -7,6 +7,13 @@
  *
  * Codec schemas are hand-rolled `TypertSchema` objects (a `parse` method is
  * the whole runtime contract) — no zod dependency, so both bundles stay tiny.
+ *
+ * A strict codec hands the schema over through a `create()` factory, never as
+ * a ready-made `schema` value: DSH materializes boundary schemas lazily
+ * (`perf(typert): materialize generated schemas on first use`) and both the
+ * Typert registry and the Gateway on either face reject a strict codec whose
+ * `create` is not a function — a bare `schema` field fails the host manifest
+ * registration with `strict codec has no create() factory`.
  */
 
 const fail = (path, expected) => {
@@ -84,6 +91,27 @@ const testResultSchema = {
   },
 }
 
+/**
+ * One STRICT codec descriptor for a hand-rolled schema.
+ *
+ * DSH materializes boundary schemas on first use, so a strict codec carries a
+ * `create()` factory returning the schema rather than the schema itself. The
+ * factory caches its one schema: the registry and both Gateway faces may call
+ * `create()` per boundary crossing, and the schema is stateless, so every
+ * caller can share the same instance.
+ * @param typeSymbol - canonical Host/wire type symbol for this boundary.
+ * @param schema - the hand-rolled `TypertSchema` (a `parse` method).
+ * @returns the strict codec descriptor consumed by the host and client manifests.
+ */
+const strictCodec = (typeSymbol, schema) => {
+  let cached
+  return {
+    mode: 'strict',
+    typeSymbol,
+    create: () => (cached === undefined ? (cached = schema) : cached),
+  }
+}
+
 /** The taskNotify Remote namespace's strict invocation descriptors. */
 export const INVOCATIONS = [
   {
@@ -93,11 +121,7 @@ export const INVOCATIONS = [
     method: 'getSettings',
     invocation: { kind: 'direct' },
     parameters: [],
-    result: {
-      mode: 'strict',
-      typeSymbol: 'dsh-task-notify#TaskNotifySettings',
-      schema: settingsSchema,
-    },
+    result: strictCodec('dsh-task-notify#TaskNotifySettings', settingsSchema),
   },
   {
     id: 'dsh-task-notify#taskNotify/updateSettings',
@@ -110,18 +134,10 @@ export const INVOCATIONS = [
         name: 'update',
         wire: 'update',
         source: 'json',
-        codec: {
-          mode: 'strict',
-          typeSymbol: 'dsh-task-notify#TaskNotifySettings',
-          schema: settingsSchema,
-        },
+        codec: strictCodec('dsh-task-notify#TaskNotifySettings', settingsSchema),
       },
     ],
-    result: {
-      mode: 'strict',
-      typeSymbol: 'dsh-task-notify#TaskNotifySettings',
-      schema: settingsSchema,
-    },
+    result: strictCodec('dsh-task-notify#TaskNotifySettings', settingsSchema),
   },
   {
     id: 'dsh-task-notify#taskNotify/next',
@@ -130,11 +146,7 @@ export const INVOCATIONS = [
     method: 'next',
     invocation: { kind: 'direct' },
     parameters: [],
-    result: {
-      mode: 'strict',
-      typeSymbol: 'dsh-task-notify#TaskNotifyItem[]',
-      schema: itemListSchema,
-    },
+    result: strictCodec('dsh-task-notify#TaskNotifyItem[]', itemListSchema),
   },
   {
     id: 'dsh-task-notify#taskNotify/testPush',
@@ -143,11 +155,7 @@ export const INVOCATIONS = [
     method: 'testPush',
     invocation: { kind: 'direct' },
     parameters: [],
-    result: {
-      mode: 'strict',
-      typeSymbol: 'dsh-task-notify#TaskNotifyTestResult',
-      schema: testResultSchema,
-    },
+    result: strictCodec('dsh-task-notify#TaskNotifyTestResult', testResultSchema),
   },
   {
     id: 'dsh-task-notify#taskNotify/testNotify',
@@ -156,11 +164,7 @@ export const INVOCATIONS = [
     method: 'testNotify',
     invocation: { kind: 'direct' },
     parameters: [],
-    result: {
-      mode: 'strict',
-      typeSymbol: 'dsh-task-notify#TaskNotifyTestResult',
-      schema: testResultSchema,
-    },
+    result: strictCodec('dsh-task-notify#TaskNotifyTestResult', testResultSchema),
   },
 ]
 
