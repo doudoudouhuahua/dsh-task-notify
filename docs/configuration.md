@@ -2,7 +2,8 @@
 
 [← 返回 README](../README.md)
 
-配置持久化在 DSH settings 的 `task-notify` 命名空间（profile 的 `settings.yaml`），重启不丢。
+配置即本插件在 profile 里的 Loader 条目 `dsh-task-notify` 的 `Config`：写入 profile 的
+`cordis.patch.yml`，重启不丢，也出现在「设置 → 插件 → dsh-task-notify」。
 
 ## 入口：会话标题栏铃铛
 
@@ -62,7 +63,7 @@
 | `token` | PushPlus Token | 空 | 一对一推送 token |
 
 > 语言**不是**本插件的设置项：它复用 DSH 自己的语言偏好（见上文「语言」一节），因此不出现在上表
-> 也不占 settings 的 `task-notify` 命名空间。
+> 也不占 `dsh-task-notify` 条目的 `Config`。
 
 ## 使用步骤
 
@@ -84,6 +85,34 @@
 > 因此不会发送审批提醒。
 
 > 除 Token 外所有开关都是即改即存，无需「保存」按钮。
+
+## 从 1.8.1 升级：设置位置变了
+
+DSH 0.1.7 把插件设置从「settings 命名空间」改为「Loader 条目的 `Config`」。旧值原本写在 profile 的
+`settings.yaml`，DSH 升级时已把它改名为 `settings.yaml.imported`。它的一次性导入按「段名 = 条目 id」
+映射，而旧段名是 `task-notify`、条目 id 是 `dsh-task-notify`，所以**没有被自动搬过来**——不处理的话
+PushPlus token 会丢、总开关会回到默认的「开」。
+
+用过 token 或改过开关时，把 `settings.yaml.imported` 里 `task-notify:` 段的内容手工搬到
+`<profile>/cordis.patch.yml`（没有 `- id: dsh-task-notify` 这一行就整段加上）：
+
+```yaml
+- id: dsh-task-notify
+  config:
+    enabled: false
+    push: false
+    token: "<你的 PushPlus token>"
+    agent: true
+    subagent: true
+    workflow: true
+    approval: true
+    question: true
+    plan: true
+    goal: true
+```
+
+搬完**重启 DSH**：宿主代码的新构建必须重启才会被加载（profile 安装在 `node_modules/` 下，DSH 的
+HMR 显式跳过该目录），配置与代码一起生效。
 
 ## 相关文档
 

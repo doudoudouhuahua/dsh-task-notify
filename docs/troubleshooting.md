@@ -2,10 +2,14 @@
 
 [← 返回 README](../README.md)
 
-**适用对象**：所有 DSH（DeepSeek Harness）插件作者。本文记录 2026-09-15 DSH 更新
-（`dsh-v0.1.6-alpha.1` 之后合入的 `perf(typert): materialize generated schemas on first use`）导致
-本插件**整行未激活**的完整排查过程，并把它整理成可复用的定位方法——同一类问题会反复出现，因为
-**平台与插件之间的契约变更不会以编译错误的形式暴露**。
+**适用对象**：所有 DSH（DeepSeek Harness）插件作者。本文记录两次 DSH 更新导致本插件
+**整行未激活**的完整排查过程，并把它整理成可复用的定位方法——同一类问题会反复出现，因为
+**平台与插件之间的契约变更不会以编译错误的形式暴露**：
+
+- 2026-09-15（`dsh-v0.1.6-alpha.1` 之后合入的 `perf(typert): materialize generated schemas on first use`）
+  改掉了 strict codec 的形状，报 `strict codec has no create() factory`；
+- 2026-09-24（`dsh-v0.1.7-rc.1` 的 `feat(settings): project volatile Config through profile-backed forms`）
+  **删除了 `ctx.settings.register`**，报 `... is not a function`；同一函数也是 `dsh-at-file` 失效的原因。
 
 ## 一、先认清失效形态
 
@@ -46,7 +50,7 @@ typert: dsh-task-notify#taskNotify/getSettings result strict codec has no create
 | `<id> (<pkg>): pending (waiting for services: xxx)` | `inject` 声明的服务没有提供者——契约改名或该行没装上 |
 | `<id> (<pkg>): failed to import` | 包的宿主入口无法解析（`exports` / 文件缺失） |
 | `<id> (<pkg>): <module> does not provide an export named 'x'` | 平台删除了插件静态导入的导出（0.1.3-alpha.1 的 `settingsNamespace` 就是这样） |
-| `<id> (<pkg>): ... is not a function` / `... of undefined` | 平台 API 形状变了，插件仍按旧形状调用 |
+| `<id> (<pkg>): ... is not a function` / `... of undefined` | 平台 API 形状变了，插件仍按旧形状调用。`ctx.settings.register is not a function` 就是 0.1.7 删除该方法后的形态 |
 
 ### 2. 运行中的代码 ≠ 仓库里的代码
 
@@ -74,6 +78,12 @@ Get-Item     $env:USERPROFILE\.dsh\profiles\node_modules\@deepseek-ai\dsh-typert
 (Get-Item $env:USERPROFILE\.dsh\profiles\node_modules\@deepseek-ai\*).Target
 ```
 
+> **覆盖安装副本还不够：宿主代码必须重启 DSH。** DSH 的 HMR 在 `isExcluded` 里显式排除
+> `/node_modules/`（`packages/boot/hmr/src/index.ts`），profile 安装的插件正好住在那里，所以改文件
+> 本身不会触发重载；而 `plugin_manager` 的 disable → enable 只是重跑 fiber，Node 的 ESM 缓存照样
+> 交回旧模块。判据：报错堆栈里的 `lib/index.js:<行>:<列>` 若指向**旧文件**的内容，就是缓存没失效
+> ——`git show HEAD:lib/index.js` 取同一行列比对即可确认。
+>
 > `profiles/<profile>/.dsh-module-fallback/node_modules` 是 DSH 的解析回退目录；数据 Git 同步会把
 > junction 展开成真实目录，导致启动报 `exists and is not a symlink or dsh-managed module proxy`。
 > 删掉那些污染条目即可，DSH 会重建。

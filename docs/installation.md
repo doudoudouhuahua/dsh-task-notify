@@ -7,7 +7,7 @@
 | 项目 | 要求 |
 | --- | --- |
 | 操作系统 | Windows 10 / 11 |
-| 宿主 | DSH Web（profile 插件机制），**≥ 0.1.6-alpha.1** |
+| 宿主 | DSH Web（profile 插件机制），**≥ 0.1.7-rc.1**（1.8.2 起；0.1.7 删除了旧的 `settings.register`，更早版本请用 1.8.1） |
 | 运行依赖 | PowerShell 7（`pwsh`）；BurntToast 模块由插件自动安装 |
 
 通知由 BurntToast 的 `New-BurntToastNotification` 经 `pwsh.exe` 发出，模块必须装在 **PowerShell 7
@@ -33,7 +33,7 @@
 
 ## 方式 A：git 源直装（推荐）
 
-适用于 DSH ≥ 0.1.6-alpha.1，安装后自动 reconcile `dsh.profile.bundles`：
+适用于 DSH ≥ 0.1.7-rc.1，安装后自动 reconcile `dsh.profile.bundles`：
 
 ```powershell
 dsh plugin --profile web add git+https://github.com/V-Reason/dsh-task-notify.git

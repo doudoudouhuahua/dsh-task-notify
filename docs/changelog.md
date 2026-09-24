@@ -2,6 +2,32 @@
 
 [← 返回 README](../README.md)
 
+## 1.8.2 — 适配 DSH 0.1.7：设置从命名空间迁移到条目 Config
+
+**修复：插件整行不激活（fiber failed），铃铛与面板都不出现**
+
+- 现象：DSH 升级后 `plugin_manager` 里 `dsh-task-notify` 为 `fiberPhase: failed`，宿主报
+  `TypeError: ctx.settings.register is not a function`，插件整行不激活；
+- 根因：DSH 0.1.7 的设置重构（`feat(settings): project volatile Config through profile-backed forms`）
+  **删除了 `ctx.settings.register(ns, schema, opts)`**。正在运行的 `settings` 服务只剩
+  `configure / describe / update / replace / mutate`，插件 `apply()` 的第一行就抛错。
+  同一个函数也是 `dsh-at-file` 失效的原因（第三方，本版不涉及）；
+- 修复（遵循 DSH 新模型，只动宿主半边，wire 契约与客户端零改动）：
+  1. 私有 `SettingsSchema` 改为导出的 `Config`，每个字段加 `.volatile()`——DSH 据此投影
+     「设置 → 插件」页面，并保证写入时**就地更新活引用、不重挂载插件**（重挂载会丢队列与 Remote 注册）；
+  2. `apply(ctx)` → `apply(ctx, config)`，`settings.get()` 改为逐字段读活引用；
+  3. `settings.update(patch)` 改为 `ctx.settings.update('dsh-task-notify', patch)`，写入 profile patch；
+  4. 新增 `readField()` 兜底：活引用缺失 / 抛错时回退 schema 默认值，平台再变也不会整行挂掉；
+- **设置需要一次迁移**：旧值存在 profile 的 `settings.yaml`（现已重命名为 `settings.yaml.imported`）
+  的 `task-notify:` 段。DSH 的一次性导入按「段名 = 条目 id」映射，`task-notify` ≠ `dsh-task-notify`，
+  因此被跳过。请把该段内容手工搬到 profile 的 `cordis.patch.yml` 里
+  `- id: dsh-task-notify` 的 `config:` 下（见 1.8.2 迁移说明 / `docs/configuration.md`），
+  否则 PushPlus token 会丢、总开关会回到默认的「开」；
+- **自检工具同步修好**：`tools/verify-contract.mjs` 过去把 `settings` 伪造成
+  `{ register: () => scope }`——恰好只 mock 了那个已消失的方法，所以它能 31/31 PASS 却漏掉这次漂移。
+  现在替身只提供真实的 `update(ns, patch)`，并新增「导出 volatile `Config`」与
+  「替身不得带 `register()`」两项断言（31 → 33 项）。
+
 ## 1.8.1 — 修复通知图标被静默换成 BurntToast 自带图片
 
 **修复：圆形角标不是 DeepSeek 图标，而是 BurntToast 自带的「吐司照片」**

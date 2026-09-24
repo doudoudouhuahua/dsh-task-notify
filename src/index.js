@@ -4,8 +4,13 @@
  * Listens for Agent/subagent/workflow completion, queues one small owned JSON
  * item per completion, pushes to PushPlus when enabled, and exposes the
  * `taskNotify` Typert Remote (settings read/write, queue poll, push test).
- * Settings live in the durable `task-notify` settings namespace, so the
- * configuration survives process restarts. The client half ships in the same
+ * Settings ARE this entry's own Config: the volatile schema below is projected
+ * by DSH's settings forms, the resolved values ride in `apply`'s `config`
+ * argument, and a write goes back through `ctx.settings.update(ENTRY_ID, patch)`
+ * into the profile patch layer — so the configuration survives process
+ * restarts. DSH 0.1.7 removed the older `ctx.settings.register(ns, schema)`
+ * namespace scope (and with it the durable `task-notify` section) in favour of
+ * exactly this model. The client half ships in the same
  * package (`./client`); the web server serves it under
  * /plugins/dsh-task-notify/client.js.
  *
@@ -37,16 +42,17 @@ export const name = 'dsh-task-notify'
 export const inject = ['typert', 'settings']
 
 /**
- * The durable settings namespace. Plain literal since DSH 0.1.3-alpha.1
- * (2026-08-30 refactor removed the `settingsNamespace(...)` helper from
- * @deepseek-ai/dsh-settings — `ctx.settings.register` accepts the string
- * directly). The namespace is unchanged, so stored settings carry over.
+ * The Loader entry id this plugin's Config is addressed by — the id the
+ * bundle's `cordis.patch.yml` inserts and the profile patch overrides. Under
+ * DSH 0.1.7+ it is the settings key: `ctx.settings.describe()` reports one form
+ * per entry id, and `ctx.settings.update(ENTRY_ID, patch)` merges into that
+ * entry's user layer.
  *
  * The language preference deliberately does NOT live here: DSH's locale
  * service already owns one durable preference (`locale.preference`), and the
  * panel slider and 「设置 → 通用 → 语言」 are the same switch.
  */
-const NS = 'task-notify'
+const ENTRY_ID = 'dsh-task-notify'
 
 /**
  * Absolute path of the DeepSeek app logo (deepseek.png at the package root),
@@ -123,19 +129,47 @@ const resolveToastIcon = () => {
   return path
 }
 
-/** Durable settings section schema (defaults: push off, main-turn off, attention kinds on). */
-const SettingsSchema = z.object({
-  push: z.boolean().default(false),
-  token: z.string().default(''),
-  enabled: z.boolean().default(true),
-  agent: z.boolean().default(false),
-  subagent: z.boolean().default(true),
-  workflow: z.boolean().default(true),
-  approval: z.boolean().default(true),
-  question: z.boolean().default(true),
-  plan: z.boolean().default(true),
-  goal: z.boolean().default(true),
+/**
+ * The plugin's Cordis Config — the Loader reads this export, and DSH's settings
+ * forms project it into 设置 → 插件 → dsh-task-notify. Every field is
+ * `.volatile()`: an edit updates the live reference in place WITHOUT remounting
+ * the plugin, which is what keeps the Remote registration, the pending queue,
+ * and the language snapshot alive across a settings write. DSH requires a
+ * volatile field to sit at a fixed object path with no volatile ancestor, so a
+ * flat top-level object is the only shape that works.
+ *
+ * Defaults: push off, main-turn off, attention kinds on.
+ */
+export const Config = z.object({
+  enabled: z.boolean().default(true).volatile(),
+  push: z.boolean().default(false).volatile(),
+  token: z.string().default('').volatile(),
+  agent: z.boolean().default(false).volatile(),
+  subagent: z.boolean().default(true).volatile(),
+  workflow: z.boolean().default(true).volatile(),
+  approval: z.boolean().default(true).volatile(),
+  question: z.boolean().default(true).volatile(),
+  plan: z.boolean().default(true).volatile(),
+  goal: z.boolean().default(true).volatile(),
 })
+
+/**
+ * Read one resolved Config field. `config` carries a live volatile reference
+ * per field rather than a plain value, so a missing or foreign handle must
+ * degrade to the schema default instead of throwing mid-notification — the
+ * same fail-soft contract `syncLang` and `sessionLog` follow.
+ * @param handle - the field's volatile reference, when the runtime supplied one.
+ * @param fallback - that field's schema default.
+ * @returns the current value, or the default when no live value is available.
+ */
+const readField = (handle, fallback) => {
+  try {
+    const value = handle?.get()
+    return value === undefined || value === null ? fallback : value
+  } catch {
+    return fallback
+  }
+}
 
 /**
  * Language the HOST is currently rendering in. Chinese until proven otherwise:
@@ -452,19 +486,25 @@ async function pushToPushPlus(token, title, content, language) {
  * the PushPlus test button. Registered under the `taskNotify` service key.
  */
 class TaskNotifyRuntime extends TypertRemoteService {
-  constructor(ctx, settings) {
+  /**
+   * @param ctx - host cordis context.
+   * @param read - reads this entry's currently resolved Config.
+   * @param write - merges a patch into this entry's user layer.
+   */
+  constructor(ctx, read, write) {
     super(ctx, 'taskNotify')
-    this.settings = settings
+    this.read = read
+    this.write = write
     this.queue = []
   }
 
   getSettings() {
-    return this.settings.get()
+    return this.read()
   }
 
   async updateSettings(update) {
-    await this.settings.update(update ?? {})
-    return this.settings.get()
+    await this.write(update ?? {})
+    return this.read()
   }
 
   next() {
@@ -477,7 +517,7 @@ class TaskNotifyRuntime extends TypertRemoteService {
   }
 
   async testPush() {
-    const s = this.settings.get()
+    const s = this.read()
     if (!s.push || s.token === '') return { ok: false, error: t(lang, 'host.test.pushDisabled') }
     return await pushToPushPlus(s.token, kindTitle('done', lang), bodyLines({
       title: t(lang, 'host.test.session'),
@@ -505,10 +545,30 @@ class TaskNotifyRuntime extends TypertRemoteService {
 /**
  * Mount the completion listeners and the Remote service.
  * @param ctx - host cordis context.
+ * @param config - this entry's resolved Config, one volatile reference per field.
  */
-export function apply(ctx) {
-  const settings = ctx.settings.register(NS, SettingsSchema, { applies: 'live' })
-  const runtime = new TaskNotifyRuntime(ctx, settings)
+export function apply(ctx, config) {
+  /**
+   * The entry's live Config, rebuilt per read: a volatile write lands in the
+   * reference `config` holds, so a cached copy would go stale immediately.
+   */
+  const readSettings = () => ({
+    enabled: readField(config?.enabled, true),
+    push: readField(config?.push, false),
+    token: readField(config?.token, ''),
+    agent: readField(config?.agent, false),
+    subagent: readField(config?.subagent, true),
+    workflow: readField(config?.workflow, true),
+    approval: readField(config?.approval, true),
+    question: readField(config?.question, true),
+    plan: readField(config?.plan, true),
+    goal: readField(config?.goal, true),
+  })
+  // The profile patch owns this entry's user layer. Because every Config field
+  // is volatile, DSH applies the merge in place: the Remote stays registered and
+  // the queue survives the write.
+  const writeSettings = (patch) => ctx.settings.update(ENTRY_ID, patch ?? {})
+  const runtime = new TaskNotifyRuntime(ctx, readSettings, writeSettings)
   syncLang(ctx)
   // Keep the module-level language current for the callers that fire OUTSIDE
   // an event handler (the two test channels): those must reflect a switch made
@@ -667,7 +727,7 @@ export function apply(ctx) {
     // this one notification, and a switch mid-render must not split it.
     const language = syncLang(ctx)
     if (event.type === 'approval/asked') {
-      if (!settings.get().approval) return
+      if (!readSettings().approval) return
       if (effectiveApprovalPolicy(session) !== 'ask') return
       const root = rootOf(session) ?? currentRoot
       if (root !== undefined) currentRoot = root
@@ -684,7 +744,7 @@ export function apply(ctx) {
       return
     }
     if (event.type === 'tool/call' && event.data.name === 'ask_user_question') {
-      if (!settings.get().question) return
+      if (!readSettings().question) return
       // A delegated child's ask fails with DELEGATED_CALLER before any UI
       // shows it — only live root agents can pause for a human answer.
       if (!isLiveRootSession(session)) return
@@ -715,7 +775,7 @@ export function apply(ctx) {
     // plan is presented. Every guard mirrors a path where the tool fails
     // BEFORE the review can appear — no guard, no toast.
     if (event.type === 'tool/call' && event.data.name === 'exit_plan_mode') {
-      if (!settings.get().plan) return
+      if (!readSettings().plan) return
       if (!isLiveRootSession(session)) return
       if (ctx.get('userQuestions') === undefined) return
       if (!planModeActive(session)) return
@@ -747,7 +807,7 @@ export function apply(ctx) {
     // the goal. Durable `goal/change` operation 'block' carries the full
     // snapshot; the fold invariant guarantees phase 'blocked' with a reason.
     if (event.type === 'goal/change' && event.data?.operation === 'block') {
-      if (!settings.get().goal) return
+      if (!readSettings().goal) return
       const goal = event.data.goal
       const message = goal?.blockedReason?.message
       const reason = typeof message === 'string' && message !== ''
@@ -768,7 +828,7 @@ export function apply(ctx) {
   // after its `subagent/end`; only the first of the pair becomes a toast.
   const seen = new Map()
   const notify = (key, msg, language) => {
-    const s = settings.get()
+    const s = readSettings()
     if (s.enabled !== true) return
     const now = Date.now()
     const last = seen.get(key)
@@ -794,7 +854,7 @@ export function apply(ctx) {
   }
 
   ctx.on('subagent/end', (info) => {
-    if (!settings.get().subagent) return
+    if (!readSettings().subagent) return
     const language = syncLang(ctx)
     const id = info === null || info === undefined ? undefined : info.id
     const child = id === undefined ? undefined : sessions()?.get(id)
@@ -811,7 +871,7 @@ export function apply(ctx) {
   })
 
   ctx.on('workflow/end', (info, result) => {
-    if (!settings.get().workflow) return
+    if (!readSettings().workflow) return
     const language = syncLang(ctx)
     notify('wf:' + String(info?.id ?? ''), {
       kind: 'workflow',
@@ -822,7 +882,7 @@ export function apply(ctx) {
   })
 
   ctx.on('agent/status', (payload) => {
-    if (!settings.get().agent) return
+    if (!readSettings().agent) return
     if (payload?.status !== 'idle') return
     const agent = payload === null || payload === undefined ? undefined : payload.agent
     if (agent === undefined || agent === null) return

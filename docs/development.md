@@ -41,19 +41,24 @@ node build.mjs
 
 - wire 编解码为手写严格 schema，无额外运行时依赖。
 
-构建后**先跑契约校验**，再同步到 profile：
+## 同步到 profile（宿主代码改动必须重启 DSH）
 
-```powershell
-node tools/verify-contract.mjs
-```
-
-## 同步到 profile
-
-pnpm 对 `file:` 依赖按内容拷贝，改完后同步到 profile 再刷新页面 / 重启：
+pnpm 对 `file:` 依赖按内容拷贝，改完后同步到 profile：
 
 ```powershell
 Copy-Item lib\*.js <profile>\node_modules\dsh-task-notify\lib\ -Force
 Copy-Item deepseek.png <profile>\node_modules\dsh-task-notify\ -Force
+```
+
+> **宿主半边的代码改动不会热更新，必须重启 DSH。** DSH 的 HMR 在 `isExcluded` 里显式排除
+> `/node_modules/`，而 profile 安装的插件正好住在那里；`plugin_manager` 的 disable → enable
+> 也只是重跑 fiber，Node 的 ESM 缓存仍会交回旧模块（报错堆栈里是**旧文件**的行列号就是信号）。
+
+同步后跑契约校验。它默认校验**正在被 dsh 加载的那一份**构建——只有那份能解析
+`@deepseek-ai/dsh-*` 裸导入，所以仓库里的 `lib/index.js` 无法直接校验：
+
+```powershell
+node tools/verify-contract.mjs
 ```
 
 > 只换图标时无需重建：把新的 `deepseek.png` 覆盖到
@@ -68,7 +73,7 @@ Copy-Item deepseek.png <profile>\node_modules\dsh-task-notify\ -Force
 | 触发源 | `session/event`（计划模式与 `turn/end` 原因）、`subagent/end`、`workflow/end`、`agent/status`（仅根会话 `idle`） |
 | 去重 | 3 秒去重窗口抑制成对事件；非根 agent 的 `idle` 直接跳过 |
 | 队列 | 宿主保留最近 20 条通知的内存队列与 `next()` 读取接口 |
-| 设置 | `ctx.settings.register('task-notify', …)` 持久化；客户端挂载后拉取并每 10 秒轮询同步 |
+| 设置 | 条目的 `Config`（`export const Config`，字段全部 `.volatile()`）：DSH 据此投影「设置 → 插件」页面，写入就地更新活引用、不重挂载；读走 `config.<字段>.get()`，写走 `ctx.settings.update('dsh-task-notify', patch)` 落到 profile patch；客户端挂载后拉取并每 10 秒轮询同步 |
 | 语言 | toast 与面板文案都取自共享 locale 偏好：宿主 `ctx.get('locale')`（读不到即中文），客户端 `locale.bind` + `locale.setLocale`；`src/i18n.js` 是唯一文案真相，`state` 折叠成键后再取词 |
 | 客户端服务取用 | 客户端服务一律**按需解析**（每次现取再判断），不在 `apply()` 时读一次就缓存：客户端包可能在 locale 服务注册之前 apply，缓存下来的 `undefined` 会让滑块永久消失（1.8.0 首发即此问题）；也不用 `inject`，否则缺 locale 的组合会整行等待、连铃铛一起消失 |
 | 运行版本自述 | 客户端在 `window.__DSH_TASK_NOTIFY__` 暴露 `{ build, hasLanguageSlider }`，用于一眼判定页面正在执行哪个构建 |
@@ -84,7 +89,7 @@ Copy-Item deepseek.png <profile>\node_modules\dsh-task-notify\ -Force
 - strict codec 一律写 **`create: () => schema`**，**不要**写 `schema` 字段——DSH 改为惰性物化后，
   注册表与两端 Gateway 都会以 `typeof codec.create !== 'function'` 直接拒绝，宿主报
   `strict codec has no create() factory`，插件整行不激活；
-- wire 类型符号（`dsh-task-notify#…`）与设置命名空间 `task-notify` 属于契约的一部分，改名即等于数据迁移；
+- wire 类型符号（`dsh-task-notify#…`）与设置条目 id `dsh-task-notify` 属于契约的一部分，改名即等于数据迁移；
 - 改动契约后必须重建并跑 `node tools/verify-contract.mjs`，它能区分「插件坏了」与「平台契约变了」；
   这类问题的通用定位套路（失效形态判定、证据来源、高频破坏点、排查清单）见[排查手册](troubleshooting.md)。
 

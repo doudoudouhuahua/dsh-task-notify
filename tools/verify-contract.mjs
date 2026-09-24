@@ -20,16 +20,19 @@
  *      carries its one optional language parameter;
  *   2. the real `TypertRegistry` accepts the host manifest and registers all
  *      five `taskNotify/*` endpoints (the exact call that used to throw);
- *   3. the built host half applies against a fake Cordis context and every
- *      notification path (approval / question / plan / goal / agent /
- *      subagent / workflow) reaches the queue with its documented label,
- *      including the switches that gate them;
+ *   3. the built host half applies against a fake Cordis context — through the
+ *      exported volatile `Config` and the real `settings.update(ns, patch)`
+ *      surface, never the `settings.register()` namespace scope DSH 0.1.7
+ *      removed — and every notification path (approval / question / plan /
+ *      goal / agent / subagent / workflow) reaches the queue with its
+ *      documented label, including the switches that gate them;
  *   4. localization — every label is Chinese until a locale snapshot says
  *      otherwise, an English locale switches the whole payload, an unmapped
  *      language falls back to English, and the language stays a HOST concern
  *      (it is what renders the toast and the push body);
- *   5. a negative control: a `schema`-only codec must still be rejected, so
- *      this check keeps detecting the same drift in the future.
+ *   5. negative controls, one per drift this tool exists for: a `schema`-only
+ *      codec must still be rejected, and the settings double must expose no
+ *      `register()`.
  *
  * Every checked notification also fires a real `pwsh.exe`/BurntToast attempt to
  * the Windows notification centre; a refused spawn or a missing BurntToast
@@ -380,23 +383,64 @@ await check('module name matches dsh.plugin.json', () => {
   return `${String(plugin.name)} inject=${JSON.stringify(plugin.inject)}`
 })
 
+/** The Loader entry id this plugin's Config is addressed by, and its field set. */
+const ENTRY_ID = 'dsh-task-notify'
+const CONFIG_FIELDS = ['enabled', 'push', 'token', 'agent', 'subagent', 'workflow', 'approval', 'question', 'plan', 'goal']
+
+await check('the build exports the volatile Config DSH settings forms project', () => {
+  /*
+   * Under DSH 0.1.7+ a plugin's settings ARE its Cordis `Config`. The Loader
+   * reads this export, resolves it into one VOLATILE reference per field, hands
+   * that map to `apply(ctx, config)`, and `settings.describe()` projects the
+   * same schema into 设置 → 插件. A missing export leaves the plugin with no
+   * configuration surface at all; a field that is not volatile makes DSH
+   * remount the plugin on every edit, which would drop the queue and the
+   * Remote registration mid-write.
+   */
+  const schema = plugin.Config
+  if (schema === undefined || typeof schema.toJSON !== 'function') {
+    throw new Error('no Config export — DSH cannot project or write this plugin\'s settings')
+  }
+  const dict = schema.dict ?? {}
+  const fields = Object.keys(dict).sort()
+  if (fields.join(',') !== [...CONFIG_FIELDS].sort().join(',')) {
+    throw new Error(`Config fields ${JSON.stringify(fields)} != ${JSON.stringify(CONFIG_FIELDS)}`)
+  }
+  const plain = Object.entries(dict).filter(([, node]) => node.meta?.volatile !== true).map(([key]) => key)
+  if (plain.length !== 0) {
+    throw new Error(`Config fields without .volatile(): ${plain.join(', ')}`)
+  }
+  return `${String(fields.length)} volatile fields`
+})
+
 /**
- * Settings scope double: the plugin only ever calls `get()` and `update()`.
- * The drive starts from the shipped defaults with 主回合 switched on, because
+ * Live Config double: the volatile reference map the Loader would build from
+ * `Config`, plus the entry's resolved values behind it. A write goes INTO the
+ * reference (exactly what the profile patch layer does for a volatile field),
+ * so a cached read would go stale here just as it would in the running Host.
+ * `store` starts from the shipped defaults with 主回合 switched on, because
  * `agent` ships OFF (a session completion would otherwise notify twice per
  * turn) and this tool must exercise every notification kind.
- * @returns the scope handed back by `ctx.settings.register`.
  */
-function makeSettingsScope() {
-  let value = { ...ALL_KINDS_ON }
-  return {
-    get: () => value,
-    update: async (patch) => {
-      value = { ...value, ...patch }
-      return value
-    },
-    watch: () => () => {},
-  }
+function makeConfigDouble() {
+  const store = { ...ALL_KINDS_ON }
+  const handles = Object.fromEntries(CONFIG_FIELDS.map((key) => [key, { get: () => store[key] }]))
+  return { store, handles }
+}
+
+const { store: settingsStore, handles: configHandles } = makeConfigDouble()
+
+/**
+ * Settings service double, shaped after the REAL 0.1.7+ surface. It carries no
+ * `register`: that namespace-scope method was removed when `Config` replaced
+ * it, and leaving it out is what makes a stray `ctx.settings.register(...)`
+ * fail loudly here instead of passing while the running Host refuses the row.
+ */
+const settingsService = {
+  update: async (ns, patch) => {
+    if (ns !== ENTRY_ID) throw new Error(`settings.update got ns ${JSON.stringify(ns)}`)
+    Object.assign(settingsStore, patch)
+  },
 }
 
 /**
@@ -427,7 +471,7 @@ function makeSession(id, events = [], parentSession = undefined) {
  */
 const pluginCtx = new Context()
 await pluginCtx.plugin(TypertRegistry)
-pluginCtx.provide('settings', { register: () => makeSettingsScope() })
+pluginCtx.provide('settings', settingsService)
 pluginCtx.provide('userQuestions', { ask: () => Promise.resolve() })
 
 /** The four Cordis events the plugin subscribes to, driven through real emits. */
@@ -444,8 +488,8 @@ function emitAgentStatus(payload) {
   pluginCtx.emit('agent/status', payload)
 }
 
-await check('apply(ctx) completes and registers every endpoint', () => {
-  plugin.apply(pluginCtx)
+await check('apply(ctx, Config) completes and registers every endpoint', () => {
+  plugin.apply(pluginCtx, configHandles)
   for (const descriptor of INVOCATIONS) {
     const endpoint = `${descriptor.service}/${descriptor.method}`
     if (pluginCtx.typert.local.get(endpoint) === undefined) {
@@ -635,10 +679,11 @@ await check('the kind switch gates its own notification', async () => {
   return '需要审批 off → 0 条'
 })
 
-await check('the settings scope round-trips a write', async () => {
+await check('the settings write path round-trips through settings.update', async () => {
   const updated = await runtime.updateSettings({ ...ALL_KINDS_ON, push: true, token: 'tok' })
   if (updated.push !== true || updated.token !== 'tok') throw new Error('the update did not stick')
   if (runtime.getSettings().push !== true) throw new Error('getSettings did not observe the update')
+  if (settingsStore.push !== true) throw new Error('the write never reached the settings store')
   await runtime.updateSettings({ ...ALL_KINDS_ON, push: false, token: '' })
   return 'push on → 读回 on'
 })
@@ -762,6 +807,13 @@ await check('a schema-only strict codec is still rejected', async () => {
   if (message === '') throw new Error('the legacy schema-only shape registered — this tool can no longer detect the drift')
   if (!message.includes('no create() factory')) throw new Error(`unexpected rejection: ${message}`)
   return message
+})
+
+await check('the settings double carries no register(), the removed namespace API', () => {
+  if (typeof settingsService.register === 'function') {
+    throw new Error('the double still carries register() — this tool cannot detect the settings drift')
+  }
+  return 'update(ns, patch) only'
 })
 
 /* ── summary ──────────────────────────────────────────────────────────────── */
